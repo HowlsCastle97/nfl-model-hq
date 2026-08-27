@@ -406,6 +406,7 @@ def build_site(out_path="site.html", games_path="games.csv",
     upcoming = df[df["result"].isna() & (df["gameday"] >= today)
                   & (df["gameday"] <= today + pd.Timedelta(days=horizon_days))]
     week_rows, parlays = [], []
+    price_age = ""
     if len(upcoming):
         lin, ens = rd.fit_models(df, int(upcoming["season"].max()))
         Xu = upcoming[V3].values
@@ -413,6 +414,24 @@ def build_site(out_path="site.html", games_path="games.csv",
         sigma = rd.RECAL_SCALE * np.sqrt(ale + epi)
         p_home = norm.cdf(mu / sigma)
         prices = rd.latest_prices(db_path)
+        price_age = ""
+        try:
+            import sqlite3 as _sq
+            _con = _sq.connect(db_path)
+            _ts = _con.execute("SELECT MAX(ts_utc) FROM snapshots").fetchone()[0]
+            _con.close()
+            if _ts:
+                _age = pd.Timestamp.now(tz="UTC") - pd.Timestamp(_ts)
+                hrs = _age.total_seconds() / 3600
+                stale = (' <span style="color:var(--yellow)">(getting old; run the '
+                         'logger for fresh prices)</span>' if hrs > 24 else "")
+                price_age = (f'<p class="sub">Market prices last logged: '
+                             f'{pd.Timestamp(_ts).strftime("%b %d, %H:%M UTC")}, '
+                             f'about {hrs:.0f}h ago{stale}. "No price yet" means no '
+                             f'price existed in that snapshot; the market may have '
+                             f'opened since.</p>')
+        except Exception:
+            pass
         for j, row in enumerate(upcoming.itertuples(index=False)):
             rec = {"date": row.gameday.date(), "away": row.away_team,
                    "home": row.home_team, "mu": mu[j], "sigma": sigma[j],
@@ -504,7 +523,7 @@ after fees, yellow means an edge too small to trust, red means the price is fair
 or worse. Each card also grades the Vegas spread: the model's chance of covering
 each side, and whether that beats the 52.4% needed to profit at a standard -110.
 Every green light still gets a human news check first.</p>
-<div class="grid">{cards}</div>
+{price_age}<div class="grid">{cards}</div>
 </div>
 
 <div id="parlays" class="panel">
@@ -576,6 +595,10 @@ confidence is honest.</p>
 
 <footer>One model, honestly uncertain. Nothing here is financial advice.</footer>
 </div></body></html>"""
+    import os
+    d = os.path.dirname(out_path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     with open(out_path, "w") as f:
         f.write(html)
     print(f"site written to {out_path} ({len(html)//1024} KB)")
