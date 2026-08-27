@@ -1,0 +1,7 @@
+kalshi_prices.db
+pbp_cache/
+*.parquet
+__pycache__/
+fake_*.db
+site*.html
+old_schema.db
