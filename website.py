@@ -403,10 +403,19 @@ def build_site(out_path="site.html", games_path="games.csv",
     hist, by_season, calib = history_tables(df)
 
     today = pd.Timestamp.today().normalize()
-    upcoming = df[df["result"].isna() & (df["gameday"] >= today)
-                  & (df["gameday"] <= today + pd.Timedelta(days=horizon_days))]
+    future = df[df["result"].isna() & (df["gameday"] >= today)]
+    upcoming = future[future["gameday"] <= today + pd.Timedelta(days=horizon_days)]
+    week_note = ""
+    if len(upcoming) == 0 and len(future):
+        first = future["gameday"].min()
+        upcoming = future[future["gameday"] <= first + pd.Timedelta(days=6)]
+        week_note = (f'<p class="sub">No games in the next {horizon_days} days; '
+                     f'showing the next scheduled week '
+                     f'({first.date()} onward).</p>')
     week_rows, parlays = [], []
     price_age = ""
+    if "week_note" not in dir():
+        week_note = ""
     if len(upcoming):
         lin, ens = rd.fit_models(df, int(upcoming["season"].max()))
         Xu = upcoming[V3].values
@@ -523,7 +532,7 @@ after fees, yellow means an edge too small to trust, red means the price is fair
 or worse. Each card also grades the Vegas spread: the model's chance of covering
 each side, and whether that beats the 52.4% needed to profit at a standard -110.
 Every green light still gets a human news check first.</p>
-{price_age}<div class="grid">{cards}</div>
+{week_note}{price_age}<div class="grid">{cards}</div>
 </div>
 
 <div id="parlays" class="panel">
