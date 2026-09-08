@@ -49,8 +49,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # Outside the repo on purpose: this database must never be committed.
-      KALSHI_DB: ${{ runner.temp }}/kalshi_snapshot.db
       HORIZON_DAYS: ${{ github.event.inputs.days || '8' }}
 
     steps:
@@ -101,12 +99,14 @@ jobs:
           PY
           mv games.new.csv games.csv
 
+      # $RUNNER_TEMP is outside the repository on purpose: the price
+      # database must never end up in a commit.
       - name: Take a Kalshi price snapshot (runner-local, throwaway)
         # Never fatal. kalshi_logger exits 1 when no markets are open, which is
         # the normal state in the offseason and midweek. The site handles missing
         # prices on its own ("No price yet").
         continue-on-error: true
-        run: python kalshi_logger.py --once --db "$KALSHI_DB"
+        run: python kalshi_logger.py --once --db "$RUNNER_TEMP/kalshi_snapshot.db"
 
       - name: Build the site
         run: |
@@ -114,7 +114,7 @@ jobs:
             --out docs/index.html \
             --games games.csv \
             --stats team_game_stats.csv \
-            --db "$KALSHI_DB" \
+            --db "$RUNNER_TEMP/kalshi_snapshot.db" \
             --days "$HORIZON_DAYS"
 
       - name: Guard against committing price history
