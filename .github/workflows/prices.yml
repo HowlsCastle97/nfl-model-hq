@@ -1,0 +1,67 @@
+# Fast layer: publish current Kalshi NFL prices as a small JSON, often.
+#
+# Why this exists: Kalshi rejects any request carrying an Origin header (403),
+# so the published page cannot fetch prices from Kalshi directly in the browser.
+# A runner has to fetch them and republish.
+#
+# Why a separate branch: this runs every 5 minutes, and committing to main that
+# often would add tens of thousands of commits a year. The `prices` branch holds
+# exactly ONE commit, amended and force-pushed in place, so it never grows. The
+# page reads it from raw.githubusercontent.com, which sends
+# Access-Control-Allow-Origin: * and caches for 300s. Serving the same file from
+# Pages instead would cap freshness at 600s, so raw is the faster path.
+#
+# This job installs requests and nothing else: no torch, no pandas, no model.
+
+name: Publish prices
+
+on:
+  schedule:
+    # Every 5 minutes is the finest cron GitHub accepts. Scheduled runs are
+    # best-effort and get delayed or dropped under load, so treat this as
+    # "usually within 5 to 15 minutes", not a guarantee.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prices
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requests
+        run: pip install "requests>=2.31"
+
+      - name: Fetch current prices
+        id: fetch
+        run: python publish_prices.py --out "$RUNNER_TEMP/prices.json"
+
+      - name: Publish to the single-commit prices branch
+        run: |
+          cp "$RUNNER_TEMP/prices.json" .
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Orphan branch, one commit, force-pushed: no history accumulates.
+          git checkout --orphan prices-tmp
+          git rm -rq --cached . || true
+          git add -f prices.json
+          if ! git diff --cached --quiet; then
+            git commit -m "prices $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push --force origin prices-tmp:prices
+          else
+            echo "Prices unchanged; nothing to publish."
+          fi
