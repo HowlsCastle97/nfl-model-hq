@@ -1,0 +1,146 @@
+# Weekly rebuild of the public site (https://howlscastle97.github.io/nfl-model-hq/).
+#
+# What this job does, in order: pull a fresh nflverse games.csv, take one Kalshi
+# price snapshot into a runner-local throwaway database, rebuild docs/index.html,
+# and commit the result back to main so GitHub Pages redeploys.
+#
+# What this job deliberately does NOT do: touch kalshi_prices.db. The price
+# history lives only on the local machine and is irreplaceable, so the snapshot
+# here is written to $RUNNER_TEMP, outside the repository, and thrown away when
+# the runner dies. A guard step below fails the build if a .db ever shows up in
+# the working tree.
+#
+# Pairs with .github/workflows/prices.yml, which republishes market prices every
+# 5 minutes to the `prices` branch. This job bakes the model's probabilities into
+# the page; that one keeps the market side current between rebuilds.
+#
+# Known limitation: team_game_stats.csv (per-game EPA) is not refreshed here, so
+# EPA features go stale as the season progresses. Same limitation as the manual
+# Sunday ritual. Refreshing it needs a play-by-play download and an incremental
+# rebuild of prep_pbp.build_team_game_stats, which currently short-circuits on
+# an existing cache file.
+
+name: Weekly site rebuild
+
+on:
+  schedule:
+    # Wednesdays 12:00 UTC (07:00 ET). By Wednesday every result from the
+    # previous week is final and the coming week's games are on the board, so
+    # this is the natural point to refit. Market prices do NOT wait for this:
+    # the prices workflow refreshes them every 5 minutes. GitHub queues cron
+    # jobs on a best-effort basis, so expect this to fire a few minutes late.
+    - cron: "0 12 * * 3"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Horizon in days for the This Week tab"
+        required: false
+        default: "8"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weekly-site
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Outside the repo on purpose: this database must never be committed.
+      KALSHI_DB: ${{ runner.temp }}/kalshi_snapshot.db
+      HORIZON_DAYS: ${{ github.event.inputs.days || '8' }}
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          # Full history: the commit step rebases onto origin/main before
+          # pushing, which a depth-1 clone cannot do.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          python -m pip install --upgrade pip
+          # The CPU wheel index keeps torch around 200 MB instead of pulling the
+          # ~2.5 GB CUDA build, which is the difference between a 1 minute and a
+          # 10 minute install on a runner.
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements.txt
+          python -c "import torch; print('torch', torch.__version__)"
+
+      - name: Refresh games.csv from nflverse
+        run: |
+          curl -sSfL --retry 3 --retry-delay 5 \
+            https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv \
+            -o games.new.csv
+          # Only accept the download if it parses and carries the columns the
+          # feature builder needs. A truncated or error-page response would
+          # otherwise poison the model silently.
+          python - <<'PY'
+          import pandas as pd, sys
+          need = {"game_id", "season", "game_type", "week", "gameday",
+                  "home_team", "away_team", "result", "home_qb_id", "away_qb_id",
+                  "home_rest", "away_rest", "div_game", "roof", "spread_line"}
+          df = pd.read_csv("games.new.csv", low_memory=False)
+          missing = need - set(df.columns)
+          if missing:
+              sys.exit(f"games.csv is missing columns: {sorted(missing)}")
+          if len(df) < 7000:
+              sys.exit(f"games.csv looks truncated: {len(df)} rows")
+          print(f"games.csv ok: {len(df)} rows through season {df.season.max()}")
+          PY
+          mv games.new.csv games.csv
+
+      - name: Take a Kalshi price snapshot (runner-local, throwaway)
+        # Never fatal. kalshi_logger exits 1 when no markets are open, which is
+        # the normal state in the offseason and midweek. The site handles missing
+        # prices on its own ("No price yet").
+        continue-on-error: true
+        run: python kalshi_logger.py --once --db "$KALSHI_DB"
+
+      - name: Build the site
+        run: |
+          python website.py \
+            --out docs/index.html \
+            --games games.csv \
+            --stats team_game_stats.csv \
+            --db "$KALSHI_DB" \
+            --days "$HORIZON_DAYS"
+
+      - name: Guard against committing price history
+        run: |
+          if git ls-files | grep -E '\.db$'; then
+            echo "::error::A .db file is tracked by git. Refusing to continue."
+            exit 1
+          fi
+          echo "No database files tracked."
+
+      - name: Commit and push if the site changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Explicit paths, so nothing else can be swept into the commit even
+          # if the build leaves stray files behind.
+          git add docs/index.html games.csv
+          if git diff --cached --name-only | grep -E '\.db$'; then
+            echo "::error::A .db file is staged. Refusing to commit."
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "Nothing changed; not committing."
+            exit 0
+          fi
+          git commit -m "Weekly site rebuild ($(date -u +%Y-%m-%d))"
+          # Rebase in case the local machine pushed while this job was running.
+          git pull --rebase origin main
+          git push origin HEAD:main

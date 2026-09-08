@@ -1,0 +1,10 @@
+# Runtime dependencies for the site build (website.py -> docs/index.html).
+# Pinned to what the local Anaconda environment runs, so a CI rebuild and a
+# local rebuild produce the same numbers.
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+requests==2.32.3
+# torch is installed separately from the CPU-only wheel index in CI; see
+# .github/workflows/weekly-site.yml. Locally any 2.x CPU build is fine.
+torch>=2.2,<3
