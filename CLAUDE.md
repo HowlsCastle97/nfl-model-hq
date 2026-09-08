@@ -51,8 +51,14 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   failure cannot stick forever), and the logger task's own exit code. Exit code
   is the number of failing checks. Run it by hand any time: `python
   healthcheck.py`. Scheduled every 30 minutes by `install_healthcheck_task.ps1`,
-  Interactive and unelevated on purpose, because a toast needs a desktop and a
-  service account has none.
+  Interactive and unelevated on purpose, because the alert is a window and a
+  service account has no desktop to put one on. Alerts fire on the transition
+  into failure and then at most once every 12 hours, so a known problem cannot
+  train you to dismiss them unread. **Not a toast**: the WinRT toast call
+  returned success and displayed nothing, since toasts need a registered
+  AppUserModelID and can be suppressed by Focus Assist invisibly to the caller.
+  An alert channel that fails silently is the exact bug this file exists to
+  catch, so it uses a message box, which either appears or does not.
 - `website.py`: builds the entire public site as one self-contained HTML file
   (`--out docs/index.html`). Tabs: This Week (cards), Parlay Lab (risk bands),
   Track Record (walk-forward 2021-2025, per-game), Bayesian 101.
@@ -118,7 +124,7 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
    Check `Get-ScheduledTaskInfo -TaskName "Kalshi NFL price logger"` (a
    LastTaskResult of 0 is success) before suspecting the script.
 2. Nothing needs watching by hand: `healthcheck.py` runs every 30 minutes and
-   toasts on failure. To see the current state at any time, run it directly or
+   raises a message box on failure. To see the current state at any time, run it directly or
    read `logs/health.json`. If it ever reports "Weekly site rebuild last run
    FAILED", the fix is usually to press Run workflow on it in the GitHub UI
    (Actions tab, "Weekly site rebuild", Run workflow), since `workflow_dispatch`

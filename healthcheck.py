@@ -41,6 +41,9 @@ HISTORY_MAX_MIN = 25
 FEED_MAX_MIN = 25
 # The site rebuilds weekly, on Wednesdays. Nine days is one missed rebuild.
 SITE_MAX_DAYS = 9
+# Once something is known broken, nagging every 30 minutes teaches you to
+# dismiss the alert unread. Re-raise twice a day instead.
+REALERT_HOURS = 12
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -192,34 +195,70 @@ def check_task():
 
 
 def notify(lines):
-    """Toast, because it is the one channel that reaches a person who is not
-    looking at a terminal. Only fires from an interactive session; under a
-    service account there is no desktop to show it on."""
-    body = " | ".join(lines)[:250].replace("'", "")
-    ps = (
-        "[void][Windows.UI.Notifications.ToastNotificationManager,"
-        "Windows.UI.Notifications,ContentType=WindowsRuntime];"
-        "$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
-        "[Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
-        "$x=$t.GetElementsByTagName('text');"
-        "[void]$x.Item(0).AppendChild($t.CreateTextNode('NFL Model HQ: check failed'));"
-        f"[void]$x.Item(1).AppendChild($t.CreateTextNode('{body}'));"
-        "$n=[Windows.UI.Notifications.ToastNotification]::new($t);"
-        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
-        r"'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'"
-        ").Show($n)")
+    """Raise a dialog the desktop cannot swallow.
+
+    A toast was the first choice and it was the wrong one. The WinRT call
+    returned success and nothing appeared, because a toast needs a registered
+    AppUserModelID and can be suppressed by Focus Assist or per-app notification
+    settings, all of it invisible to the caller. An alerting channel that fails
+    silently is worse than none: it is the failure mode this file exists to
+    prevent, reproduced inside the thing meant to prevent it.
+
+    A message box is crude, but it is a window. It appears or it does not, and
+    it cannot be turned off behind your back. It is launched detached so the
+    check exits immediately rather than blocking until someone clicks OK, which
+    would otherwise be killed by the task's execution time limit.
+    """
+    body = "\n".join(f"- {ln}" for ln in lines)[:900]
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms\n"
+        "[System.Windows.Forms.MessageBox]::Show(@'\n"
+        f"{body}\n"
+        "\nRun `python healthcheck.py` for the full report.\n"
+        "'@, 'NFL Model HQ: health check failed', 0, 48) | Out-Null\n")
     try:
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                       capture_output=True, timeout=60)
+        tmp = os.path.join(os.environ.get("TEMP", HERE), "nflhq_alert.ps1")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(script)
+        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                          "-WindowStyle", "Hidden", "-File", tmp])
     except Exception as e:
-        print(f"could not raise a notification: {e}", file=sys.stderr)
+        print(f"could not raise an alert: {e}", file=sys.stderr)
+
+
+def load_prev(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def should_alert(prev, failing):
+    """Alert on the transition into failure, then at most once every 12 hours.
+
+    Every 30 minutes forever would train you to dismiss it without reading,
+    which is the same as having no alert at all.
+    """
+    if not failing:
+        return False
+    if not prev.get("failing"):
+        return True
+    last = prev.get("last_alert")
+    if not last:
+        return True
+    try:
+        return age_min(parse_ts(last)) > REALERT_HOURS * 60
+    except Exception:
+        return True
 
 
 def main():
     ap = argparse.ArgumentParser(description="Check every layer that fails quietly")
     ap.add_argument("--db", default=os.path.join(HERE, "kalshi_prices.db"))
-    ap.add_argument("--json", dest="json_out", default=None,
-                    help="write the result as JSON for anything downstream")
+    ap.add_argument("--json", dest="json_out",
+                    default=os.path.join(HERE, "logs", "health.json"),
+                    help="where the result and the alert state are kept")
     ap.add_argument("--notify", action="store_true",
                     help="raise a Windows toast if any check fails")
     ap.add_argument("--quiet", action="store_true",
@@ -251,12 +290,18 @@ def main():
             print(f"  [{mark}] {r['check']}: {r['detail']}")
         print(f"  {len(failed)} failing" if failed else "  all clear")
 
+    prev = load_prev(args.json_out)
+    alerting = args.notify and should_alert(prev, len(failed))
+    if alerting:
+        notify(failed)
     if args.json_out:
+        os.makedirs(os.path.dirname(args.json_out) or ".", exist_ok=True)
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump({"ts": now().isoformat(timespec="seconds"),
-                       "failing": len(failed), "checks": results}, f, indent=1)
-    if failed and args.notify:
-        notify(failed)
+                       "failing": len(failed), "checks": results,
+                       "last_alert": (now().isoformat(timespec="seconds")
+                                      if alerting else prev.get("last_alert"))},
+                      f, indent=1)
     return len(failed)
 
 

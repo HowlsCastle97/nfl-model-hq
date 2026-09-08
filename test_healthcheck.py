@@ -142,6 +142,23 @@ stub(workflows=WF_OK, runs=[{"workflow_id": 1, "status": "in_progress",
 good, detail = H.check_actions()
 ok(good, "a run in progress is not a failure")
 
+# ---------- when to actually interrupt someone ----------
+# An alert that fires every 30 minutes forever gets dismissed unread, which is
+# indistinguishable from having no alert at all.
+ok(H.should_alert({}, 0) is False, "healthy state must not alert")
+ok(H.should_alert({"failing": 0}, 2) is True, "healthy to failing must alert")
+ok(H.should_alert({"failing": 2, "last_alert": iso(30)}, 2) is False,
+   "still failing 30 minutes later must stay quiet")
+ok(H.should_alert({"failing": 2, "last_alert": iso(60 * 13)}, 2) is True,
+   "still failing after 13 hours must re-raise")
+ok(H.should_alert({"failing": 2}, 2) is True,
+   "failing with no recorded alert must alert")
+ok(H.should_alert({"failing": 2, "last_alert": "not a timestamp"}, 2) is True,
+   "an unreadable alert stamp must fail open, not swallow the alert")
+ok(H.should_alert({"failing": 1, "last_alert": iso(5)}, 0) is False,
+   "recovery must not alert")
+print("alerting  -> transition, 12h re-raise, and fail-open all behave")
+
 # ---------- a crashing check must not take the run down ----------
 def boom(*a, **k): raise RuntimeError("network on fire")
 H.requests.get = boom

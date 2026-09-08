@@ -1,7 +1,7 @@
 @echo off
 rem Health check: verifies delivered data, not configuration. See healthcheck.py.
 rem Scheduled every 30 minutes and INTERACTIVE on purpose, unlike the logger:
-rem a toast needs a desktop to appear on, and a service account has none. The
+rem the alert is a message box, which needs a desktop, and a service has none. The
 rem trade is that alerts wait until you are signed in, which is also the only
 rem time you could act on one.
 setlocal

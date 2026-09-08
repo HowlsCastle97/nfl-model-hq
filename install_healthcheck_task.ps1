@@ -4,10 +4,10 @@
 
 .DESCRIPTION
   Deliberately Interactive, and deliberately NOT elevated, unlike
-  install_logger_task.ps1. The alert channel is a Windows toast, and a toast
-  needs a desktop to render on; an S4U service account has none, so an alert
-  raised there would be silently swallowed, which is the exact failure mode this
-  whole thing exists to prevent.
+  install_logger_task.ps1. The alert is a message box, which needs a desktop to
+  render on; an S4U service account has none, so an alert raised there would be
+  silently swallowed, which is the exact failure mode this whole thing exists to
+  prevent.
 
   The cost is that alerts wait until you are signed in. StartWhenAvailable means
   a check missed while the machine was off runs shortly after you log back in,
@@ -32,7 +32,7 @@ $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" 
     -LogonType Interactive -RunLevel Limited
 $desc = "Checks delivered data every $IntervalMinutes minutes: price history age " +
         "per series, published feed age, site build age, GitHub Actions results, " +
-        "and the logger task's own exit code. Toasts on failure."
+        "and the logger task's own exit code. Raises a message box on failure."
 
 try { Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop } catch {}
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger `
