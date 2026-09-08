@@ -41,6 +41,18 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   markets open weeks before kickoff), writes timestamped snapshots to
   `kalshi_prices.db` (gitignored; irreplaceable local data, never commit).
   Handles dollar-string and integer-cent price fields; schema self-migrates.
+- `healthcheck.py`: watchdog over every layer that fails silently. Checks
+  delivered data rather than configuration, which is the distinction that
+  matters: all three failures of 2026-09-07 had a job that existed, was enabled,
+  and was not delivering. Checks price history age per series (a Kalshi ticker
+  rename would drop one series while the others look healthy), published feed
+  age, site build age from the footer stamp, GitHub Actions results (parse
+  failures and run failures told apart, grouped by workflow id so a pre-fix
+  failure cannot stick forever), and the logger task's own exit code. Exit code
+  is the number of failing checks. Run it by hand any time: `python
+  healthcheck.py`. Scheduled every 30 minutes by `install_healthcheck_task.ps1`,
+  Interactive and unelevated on purpose, because a toast needs a desktop and a
+  service account has none.
 - `website.py`: builds the entire public site as one self-contained HTML file
   (`--out docs/index.html`). Tabs: This Week (cards), Parlay Lab (risk bands),
   Track Record (walk-forward 2021-2025, per-game), Bayesian 101.
@@ -105,7 +117,13 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
    went missing in August 2026, silently, because nothing reports a dead logger.
    Check `Get-ScheduledTaskInfo -TaskName "Kalshi NFL price logger"` (a
    LastTaskResult of 0 is success) before suspecting the script.
-2. Sunday: refresh `games.csv` from nflverse raw GitHub URL, run
+2. Nothing needs watching by hand: `healthcheck.py` runs every 30 minutes and
+   toasts on failure. To see the current state at any time, run it directly or
+   read `logs/health.json`. If it ever reports "Weekly site rebuild last run
+   FAILED", the fix is usually to press Run workflow on it in the GitHub UI
+   (Actions tab, "Weekly site rebuild", Run workflow), since `workflow_dispatch`
+   is declared for exactly that.
+3. Sunday: refresh `games.csv` from nflverse raw GitHub URL, run
    `python website.py --out docs/index.html`, commit and push (Pages
    redeploys automatically).
 
