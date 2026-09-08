@@ -155,7 +155,14 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
   text-transform:uppercase;letter-spacing:.02em}
 .date{color:var(--dim);font-size:.75rem}
 .call{font-size:.83rem;margin:5px 0 2px}
-.gline{color:var(--green);font-size:.8rem;margin-bottom:8px}
+.gline{color:var(--white);font-size:.8rem;margin-bottom:5px}
+.picks{margin:0 0 9px}
+.picks .plab{display:block;font-size:.68rem;font-weight:600;color:var(--dim);
+  text-transform:uppercase;letter-spacing:.05em;margin-bottom:1px}
+.picks .plist{font-size:1.02rem;font-weight:700;color:var(--green);
+  line-height:1.3}
+.picks .pnone{font-size:.85rem;font-weight:600;color:var(--dim)}
+.picks .psmall{font-size:.7rem;font-weight:600;color:var(--dim)}
 .bars{display:grid;gap:4px;margin:4px 0 2px}
 .brow{display:grid;grid-template-columns:96px 1fr 44px;align-items:center;
   gap:8px;font-size:.7rem}
@@ -332,6 +339,18 @@ function applyCard(card, events){
   if (note){ note.innerHTML = noteFor(t, side, fav, mktFav, soft); note.hidden = false; }
   var badge = card.querySelector('.verdict');
   if (badge){ badge.className = 'verdict ' + TIER_CLS[t]; badge.innerHTML = verdict; }
+  /* The picks row is the loudest thing on the card, so it has to move with the
+     price. The spread pick is model versus the Vegas line and never changes. */
+  var plist = card.querySelector('.plist');
+  if (plist){
+    var picks = [];
+    if (t === 'high') picks.push(side + ' ML');
+    else if (t === 'small') picks.push(side +
+      ' ML <span class="psmall">(small edge)</span>');
+    if (card.dataset.sp) picks.push(card.dataset.sp);
+    plist.innerHTML = picks.length ? picks.join(' &middot; ')
+      : '<span class="pnone">No recommended play</span>';
+  }
   TIERS.forEach(function(x){ card.classList.remove('tier-' + x); });
   card.classList.add('tier-' + t);
   return true;
@@ -609,14 +628,34 @@ def game_card(r):
     call += f" &plusmn;{sigma:.0f}"
     fav0 = r["home"] if pm >= 0.5 else r["away"]
     fav_p = pm if pm >= 0.5 else 1 - pm
-    gline = (f'Gambler terms: <b>{fav_line(mu, r["home"], r["away"])}</b> &middot; '
-             f'{fav0} ML <b>{american(fav_p)}</b>')
+    gline = (f'Model says the line should be: '
+             f'<b>{fav_line(mu, r["home"], r["away"])}</b> &middot; '
+             f'fair ML for {fav0} <b>{american(fav_p)}</b>')
     v0 = str(r.get("verdict", ""))
+    ml_pick = ""
     if "&mdash;" in v0 and (v0.startswith("HIGH VALUE") or v0.startswith("CAUTIOUS")):
         vside = v0.split("&mdash;")[-1].strip().replace("small edge on ", "")
-        if vside != fav0:
-            gline += (f' &middot; or for value: <b>{vside} ML '
-                      f'{american(1 - fav_p)}</b> (why below)')
+        ml_pick = f'{vside} ML' + ('' if v0.startswith("HIGH VALUE")
+                                   else ' <span class="psmall">(small edge)</span>')
+    # The spread pick is computed once here because both the picks row and the
+    # spread detail row below need it. It is model versus the Vegas line only,
+    # so live Kalshi prices never change it; the page JS leaves it alone.
+    sl = r.get("spread_line")
+    sp_side = sp_ln = None
+    sp_p = 0.0
+    if sl is not None and not pd.isna(sl):
+        p_ch = norm.cdf((mu - sl) / sigma)
+        sp_side, sp_p = ((r["home"], p_ch) if p_ch >= 0.5
+                         else (r["away"], 1 - p_ch))
+        sp_ln = (f"-{abs(sl):g}" if (sp_side == r["home"]) == (sl > 0)
+                 else f"+{abs(sl):g}")
+    sp_pick = f"{sp_side} {sp_ln}" if sp_side is not None and sp_p >= 0.58 else ""
+    picks = [x for x in (ml_pick, sp_pick) if x]
+    picks_row = ('<div class="picks"><span class="plab">Recommended picks</span>'
+                 '<span class="plist">'
+                 + (' &middot; '.join(picks) if picks
+                    else '<span class="pnone">No recommended play</span>')
+                 + '</span></div>')
     model_bar = (f'<div class="brow"><span class="blab">Bayesian model</span>'
                  f'<div class="btrack"><div class="bfill model" '
                  f'style="width:{pm*100:.1f}%"></div></div>'
@@ -674,12 +713,8 @@ def game_card(r):
     if not note:
         note = '<div class="gap notetxt" hidden></div>'
     spread_row = ""
-    sl = r.get("spread_line")
-    if sl is not None and not pd.isna(sl):
-        p_ch = norm.cdf((mu - sl) / sigma)
-        side, p = ((r["home"], p_ch) if p_ch >= 0.5 else (r["away"], 1 - p_ch))
-        line = (f"-{abs(sl):g}" if (side == r["home"]) == (sl > 0)
-                else f"+{abs(sl):g}")
+    if sp_side is not None:
+        side, p, line = sp_side, sp_p, sp_ln
         if p >= 0.58:
             tag = '<span class="hit">value at a book\'s -110</span>'
         elif p >= 0.545:
@@ -693,10 +728,11 @@ def game_card(r):
     return (f'<div class="card gcard tier-{verdict_tier(v)}" '
             f'data-keys="{kalshi_lookup(r["away"], r["home"])}" '
             f'data-away="{r["away"]}" data-home="{r["home"]}" '
-            f'data-p="{pm:.6f}">'
+            f'data-sp="{sp_pick}" data-p="{pm:.6f}">'
             f'<div class="match"><span class="teams">{r["away"]} @ '
             f'{r["home"]}</span><span class="date">{r["date"]}</span></div>'
             f'<div class="call">{call}</div><div class="gline">{gline}</div>'
+            f'{picks_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}{spread_row}{note}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
