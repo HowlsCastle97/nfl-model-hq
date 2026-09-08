@@ -1,5 +1,6 @@
 import argparse
 import itertools
+from collections import Counter
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
@@ -172,10 +173,15 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .v-caut{background:var(--yellow);color:#141005}
 .v-avoid{background:none;border:1px solid var(--red);color:var(--red)}
 .v-none{background:none;border:1px solid var(--dim);color:var(--dim)}
-.bandbar{display:flex;gap:6px;margin:10px 0}
+.bandbar{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
 .bandbtn{background:none;border:1px solid var(--white);color:var(--white);
   padding:5px 14px;border-radius:99px;font:600 .8rem "Segoe UI",sans-serif;cursor:pointer}
 .bandbtn.on{background:var(--green);border-color:var(--green);color:#08120b}
+.bandbtn .cnt{opacity:.6;font-weight:400;margin-left:5px;
+  font-variant-numeric:tabular-nums}
+.bandbtn.on .cnt{opacity:.75}
+.bandbtn:disabled{opacity:.35;cursor:default}
+.nomatch{color:var(--dim);font-size:.85rem;margin:10px 0}
 h2{font-family:"Arial Narrow",sans-serif;font-size:1.15rem;text-transform:uppercase;
   color:var(--green);margin:18px 0 8px}
 table{width:100%;border-collapse:collapse;font-size:.82rem;margin:8px 0}
@@ -200,8 +206,21 @@ TABS_JS = """
 function band(b){
   document.querySelectorAll('.prow').forEach(r=>{
     r.style.display=(b==='all'||r.classList.contains('band-'+b))?'':'none';});
-  document.querySelectorAll('.bandbtn').forEach(x=>x.classList.remove('on'));
+  document.querySelectorAll('#parlay-bands .bandbtn').forEach(
+    x=>x.classList.remove('on'));
   document.getElementById('band-'+b).classList.add('on');
+}
+function tier(t){
+  var shown=0;
+  document.querySelectorAll('.gcard').forEach(c=>{
+    var hit=(t==='all'||c.classList.contains('tier-'+t));
+    c.style.display=hit?'':'none';
+    if(hit){shown++;}});
+  document.querySelectorAll('#week-tiers .bandbtn').forEach(
+    x=>x.classList.remove('on'));
+  document.getElementById('tier-'+t).classList.add('on');
+  var e=document.getElementById('week-empty');
+  if(e){e.style.display=shown?'none':'';}
 }
 function tab(id){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
@@ -210,6 +229,248 @@ function tab(id){
   document.getElementById('b-'+id).classList.add('on');
   window.scrollTo(0,0);
 }
+"""
+
+PRICES_JS = """
+/* Fast layer. The page ships with the model's probabilities baked in and the
+   market prices as of the last full build. This refetches only the market side
+   from prices.json and recombines the two in the browser, so a page built on
+   Wednesday still shows Sunday's prices. Everything here is a no-op if the
+   fetch fails: the prices baked in at build time simply stand. */
+var TIERS = ['high', 'small', 'none', 'nopr'];
+var TIER_CLS = {high: 'v-high', small: 'v-caut', none: 'v-avoid', nopr: 'v-none'};
+function feeOf(p){ return 0.07 * p * (1 - p); }
+function tierOfVerdict(v){
+  if (v.indexOf('HIGH VALUE') === 0) return 'high';
+  if (v.indexOf('CAUTIOUS') === 0) return 'small';
+  if (v.indexOf('NO VALUE') === 0) return 'none';
+  return 'nopr';
+}
+/* Same three cases as game_card's Python prose, kept in step deliberately: if
+   these ever diverge the page would explain a verdict it is not showing. */
+function noteFor(t, side, fav, mktFav, soft){
+  if (t === 'none'){
+    return fav === mktFav
+      ? ('The model and the market see this game the same way: <b>' + fav +
+         '</b> likely wins, and the price already says so. Fair price, no bet.')
+      : ('The model leans <b>' + fav + '</b> while the market leans ' + mktFav +
+         ', but not by enough to beat the price after fees. No bet.');
+  }
+  if (side !== fav){
+    return ('For value: the model still expects <b>' + fav + '</b> to win, but ' +
+            'the market charges too much for ' + fav + '. The value play is <b>' +
+            side + '</b>: buying the underpriced side, not picking the winner.' + soft);
+  }
+  if (side === mktFav){
+    return ('For value: the model and the market agree <b>' + side + '</b> is the ' +
+            'likely winner, but the model is more confident than the price ' +
+            'implies. The value play is <b>' + side + '</b>.' + soft);
+  }
+  return ('For value: the model calls an upset. It makes <b>' + side + '</b> the ' +
+          'favorite while the market does not, so ' + side + ' comes cheap if the ' +
+          'model is right. The value play is <b>' + side + '</b>.' + soft);
+}
+function recountTiers(){
+  var counts = {high: 0, small: 0, none: 0, nopr: 0}, total = 0;
+  document.querySelectorAll('.gcard').forEach(function(c){
+    total++;
+    TIERS.forEach(function(t){ if (c.classList.contains('tier-' + t)) counts[t]++; });
+  });
+  var all = document.getElementById('tier-all');
+  if (all && all.querySelector('.cnt')) all.querySelector('.cnt').textContent = total;
+  TIERS.forEach(function(t){
+    var b = document.getElementById('tier-' + t);
+    if (!b) return;
+    if (b.querySelector('.cnt')) b.querySelector('.cnt').textContent = counts[t];
+    b.disabled = counts[t] === 0;
+    /* Never strand the reader on a filter that just emptied. */
+    if (counts[t] === 0 && b.classList.contains('on')) tier('all');
+  });
+}
+function applyCard(card, events){
+  var trip = (card.dataset.keys || '').split(',');
+  var ev = null, ac = null, hc = null;
+  for (var i = 0; i < trip.length && !ev; i++){
+    var parts = trip[i].split(':');
+    if (parts.length === 3 && events[parts[0]]){
+      ev = events[parts[0]]; ac = parts[1]; hc = parts[2];
+    }
+  }
+  if (!ev) return false;
+  var home = card.dataset.home, away = card.dataset.away;
+  var pm = parseFloat(card.dataset.p);
+  var hp = ev[hc], ap = ev[ac];
+  var hAsk = hp && hp.ask != null ? hp.ask : null;
+  var aAsk = ap && ap.ask != null ? ap.ask : null;
+  if (hAsk === null) return false;
+
+  var eHome = pm - hAsk - feeOf(hAsk);
+  var eAway = aAsk === null ? -1 : (1 - pm) - aAsk - feeOf(aAsk);
+  var best = Math.max(eHome, eAway);
+  var side = eHome >= eAway ? home : away;
+  var verdict, t;
+  if (best > 0.04){ verdict = 'HIGH VALUE &mdash; ' + side; t = 'high'; }
+  else if (best > 0){ verdict = 'CAUTIOUS &mdash; small edge on ' + side; t = 'small'; }
+  else { verdict = 'NO VALUE at current price'; t = 'none'; }
+
+  var bar = card.querySelector('.mktrow .bfill.mkt');
+  var val = card.querySelector('.mktrow .bval');
+  if (bar) bar.style.width = (hAsk * 100).toFixed(1) + '%';
+  if (val) val.innerHTML = Math.round(hAsk * 100) + '&cent;';
+
+  var gap = card.querySelector('.gaptxt');
+  if (gap){
+    var g = (pm - hAsk) * 100;
+    gap.innerHTML = 'Both bars: chance the home team wins. Disagreement: <b>' +
+      (g >= 0 ? '+' : '') + g.toFixed(0) + '</b> points of probability ' +
+      (g > 0 ? 'toward ' : 'against ') + home;
+  }
+  var fav = pm >= 0.5 ? home : away;
+  var mktFav = hAsk >= 0.5 ? home : away;
+  var soft = t === 'high' ? '' : ' The edge is small, so treat this one lightly.';
+  var note = card.querySelector('.notetxt');
+  if (note){ note.innerHTML = noteFor(t, side, fav, mktFav, soft); note.hidden = false; }
+  var badge = card.querySelector('.verdict');
+  if (badge){ badge.className = 'verdict ' + TIER_CLS[t]; badge.innerHTML = verdict; }
+  TIERS.forEach(function(x){ card.classList.remove('tier-' + x); });
+  card.classList.add('tier-' + t);
+  return true;
+}
+function applyPrices(){
+  if (typeof PRICES_URL !== 'string' || !PRICES_URL) return;
+  fetch(PRICES_URL, {cache: 'no-store'}).then(function(r){
+    if (!r.ok) throw new Error('http ' + r.status);
+    return r.json();
+  }).then(function(d){
+    var events = (d && d.events) || {};
+    var n = 0;
+    document.querySelectorAll('.gcard').forEach(function(c){
+      if (applyCard(c, events)) n++;
+    });
+    recountTiers();
+    var el = document.getElementById('price-age');
+    /* No game matched the feed: the page is still showing build-time prices,
+       so it must not claim to be live. */
+    if (el && d.ts && n > 0){
+      var age = (Date.now() - Date.parse(d.ts)) / 60000;
+      var when = age < 1 ? 'just now'
+               : age < 60 ? Math.round(age) + ' min ago'
+               : (age / 60).toFixed(1) + ' h ago';
+      var warn = age > 90
+        ? ' <span style="color:var(--yellow)">(the price feed has stalled)</span>'
+        : '';
+      el.innerHTML = 'Market prices are live: updated <b>' + when + '</b> for ' + n +
+        ' of ' + document.querySelectorAll('.gcard').length +
+        ' games. Model probabilities are from the last full rebuild.' + warn;
+    }
+  }).catch(function(){ /* keep the prices baked in at build time */ });
+}
+if (document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', applyPrices);
+} else { applyPrices(); }
+/* Refresh while the tab sits open, and again when the reader returns to it. The
+   CDN caps real freshness at 5 minutes, so polling faster would be wasted. */
+setInterval(applyPrices, 300000);
+document.addEventListener('visibilitychange', function(){
+  if (!document.hidden) applyPrices();
+});
+"""
+
+MLB_JS = r"""
+/* MLB tab. Read-only. Every number here is GooseLine's model, fetched at page
+   load from their repo; nothing in this file computes a baseball prediction and
+   nothing on the NFL side depends on it. If their feed is unreachable the tab
+   says so and the rest of the page is unaffected. */
+function mlbCsv(text){
+  var lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+  var head = lines[0].split(',');
+  var rows = [];
+  for (var i = 1; i < lines.length; i++){
+    /* The note column is free text and may be quoted with embedded commas. */
+    var cells = [], cur = '', q = false, ln = lines[i];
+    for (var j = 0; j < ln.length; j++){
+      var ch = ln[j];
+      if (ch === '"'){ if (q && ln[j+1] === '"'){ cur += '"'; j++; } else q = !q; }
+      else if (ch === ',' && !q){ cells.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    cells.push(cur);
+    var o = {};
+    for (var k = 0; k < head.length; k++) o[head[k]] = cells[k];
+    rows.push(o);
+  }
+  return rows;
+}
+function mlbNum(v){ var f = parseFloat(v); return isNaN(f) ? null : f; }
+function mlbBadge(v){
+  if (!v) return '<span class="verdict v-none">No price</span>';
+  if (v.indexOf('HIGH VALUE') === 0) return '<span class="verdict v-high">' + v + '</span>';
+  if (v.indexOf('CAUTIOUS') === 0) return '<span class="verdict v-caut">' + v + '</span>';
+  if (v.indexOf('NO VALUE') === 0) return '<span class="verdict v-avoid">' + v + '</span>';
+  return '<span class="verdict v-none">' + v + '</span>';
+}
+function mlbCard(r){
+  var p = mlbNum(r.p_home), mk = mlbNum(r.mkt_home), mu = mlbNum(r.mu);
+  var sg = mlbNum(r.sigma), edge = mlbNum(r.edge);
+  if (p === null) return '';
+  var call = mu === null ? '' :
+    (mu >= 0 ? 'GooseLine model: <b>' + r.home + ' by ' + Math.abs(mu).toFixed(1) + '</b>'
+             : 'GooseLine model: <b>' + r.away + ' by ' + Math.abs(mu).toFixed(1) + '</b>') +
+    (sg === null ? '' : ' &plusmn;' + sg.toFixed(1) + ' runs');
+  var bars =
+    '<div class="brow"><span class="blab">GooseLine model</span>' +
+    '<div class="btrack"><div class="bfill model" style="width:' + (p*100).toFixed(1) + '%"></div></div>' +
+    '<span class="bval">' + Math.round(p*100) + '%</span></div>' +
+    '<div class="brow"><span class="blab">Market price</span><div class="btrack">' +
+    (mk === null ? '' : '<div class="bfill mkt" style="width:' + (mk*100).toFixed(1) + '%"></div>') +
+    '</div><span class="bval">' + (mk === null ? '&mdash;' : Math.round(mk*100) + '&cent;') + '</span></div>';
+  var sp = (r.away_sp || r.home_sp)
+    ? '<div class="gap">Starters: ' + (r.away_sp || 'TBD') + ' at ' + (r.home_sp || 'TBD') +
+      (r.sp_unknown === 'True' ? ' <span style="color:var(--yellow)">(a starter was unannounced, so the range is widened)</span>' : '') + '</div>'
+    : '';
+  var eg = (edge === null || mk === null) ? '' :
+    '<div class="gap">Edge after fees: <b>' + (edge >= 0 ? '+' : '') + (edge*100).toFixed(1) + '%</b></div>';
+  var verdict = (r.verdict && r.verdict !== 'pass') ? r.verdict
+              : (mk === null ? '' : 'NO VALUE at current price');
+  return '<div class="card"><div class="match"><span class="teams">' + r.away + ' @ ' +
+    r.home + '</span><span class="date">' + r.date + '</span></div>' +
+    '<div class="call">' + call + '</div><div class="bars">' + bars + '</div>' +
+    sp + eg + mlbBadge(verdict) + '</div>';
+}
+function loadMlb(){
+  var host = document.getElementById('mlb-slate');
+  var meta = document.getElementById('mlb-meta');
+  if (!host || typeof MLB_FEED_URL !== 'string' || !MLB_FEED_URL) return;
+  fetch(MLB_FEED_URL, {cache: 'no-store'}).then(function(r){
+    if (!r.ok) throw new Error('http ' + r.status);
+    return r.text();
+  }).then(function(t){
+    var rows = mlbCsv(t);
+    if (!rows.length) throw new Error('empty feed');
+    /* Show only the newest slate, and only games not yet settled. */
+    var latest = rows.reduce(function(m, r){ return r.date > m ? r.date : m; }, '');
+    var slate = rows.filter(function(r){ return r.date === latest; });
+    var open = slate.filter(function(r){ return !r.result; });
+    var show = open.length ? open : slate;
+    var cards = show.map(mlbCard).filter(Boolean).join('');
+    host.innerHTML = cards || '<p class="sub">No MLB games on the latest slate.</p>';
+    var settled = rows.filter(function(r){ return r.result; }).length;
+    if (meta){
+      meta.innerHTML = 'Slate of <b>' + latest + '</b>, ' + show.length + ' games' +
+        (open.length ? '' : ' (all settled)') + '. Feed carries ' + settled +
+        ' settled games since ' + rows[0].date + '.';
+    }
+  }).catch(function(e){
+    host.innerHTML = '<p class="sub">The GooseLine MLB feed is unreachable right now (' +
+      e.message + '). This tab is the only thing affected; the NFL model on this ' +
+      'site does not depend on it.</p>';
+    if (meta) meta.innerHTML = '';
+  });
+}
+if (document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', loadMlb);
+} else { loadMlb(); }
 """
 
 B101 = """
@@ -296,6 +557,41 @@ def ats_label(x):
     return f"{x.ats_pick} {line} &middot; {res}"
 
 
+DEFAULT_MLB_FEED = ("https://raw.githubusercontent.com/jdev-02/"
+                    "gooseline-model-hq/main/data/mlb/narrative/log.csv")
+DEFAULT_PRICES_URL = ("https://raw.githubusercontent.com/HowlsCastle97/"
+                      "nfl-model-hq/prices/prices.json")
+
+
+def kalshi_lookup(away, home):
+    """Alias candidates as 'eventkey:awaycode:homecode' triples for the page JS.
+
+    Mirrors rundown.match_event: the browser tries each candidate in turn and
+    uses the first Kalshi event that exists, so LA/LAR and JAX/JAC resolve the
+    same way client-side as they do at build time.
+    """
+    out = []
+    for a in rd.KALSHI_ALIASES.get(away, [away]):
+        for h in rd.KALSHI_ALIASES.get(home, [home]):
+            out.append(f"{a}{h}:{a}:{h}")
+    return ",".join(out)
+
+
+def verdict_tier(v):
+    """Bucket a verdict string into the class used by the This Week filter."""
+    if v.startswith("HIGH VALUE"):
+        return "high"
+    if v.startswith("CAUTIOUS"):
+        return "small"
+    if v.startswith("NO VALUE"):
+        return "none"
+    return "nopr"
+
+
+TIER_BUTTONS = (("high", "High value"), ("small", "Small edge"),
+                ("none", "No value"), ("nopr", "No price"))
+
+
 def verdict_badge(v):
     if v.startswith("HIGH VALUE"):
         return f'<span class="verdict v-high">{v}</span>'
@@ -328,17 +624,18 @@ def game_card(r):
     if r.get("mkt_home") is not None and not pd.isna(r.get("mkt_home")):
         mk = float(r["mkt_home"])
         gap = (pm - mk) * 100
-        mkt_bar = (f'<div class="brow"><span class="blab">Market price</span>'
+        mkt_bar = (f'<div class="brow mktrow"><span class="blab">Market price</span>'
                    f'<div class="btrack"><div class="bfill mkt" '
                    f'style="width:{mk*100:.1f}%"></div></div>'
                    f'<span class="bval">{mk*100:.0f}&cent;</span></div>')
-        gaptxt = (f'<div class="gap">Both bars: chance the home team wins. '
+        gaptxt = (f'<div class="gap gaptxt">Both bars: chance the home team wins. '
                   f'Disagreement: <b>{gap:+.0f}</b> points of probability '
                   f'{"toward" if gap > 0 else "against"} {r["home"]}</div>')
     else:
-        mkt_bar = (f'<div class="brow"><span class="blab">Market price</span>'
-                   f'<div class="btrack"></div><span class="bval">&mdash;</span></div>')
-        gaptxt = '<div class="gap">Market has not opened this game yet</div>'
+        mkt_bar = (f'<div class="brow mktrow"><span class="blab">Market price</span>'
+                   f'<div class="btrack"><div class="bfill mkt" style="width:0%">'
+                   f'</div></div><span class="bval">&mdash;</span></div>')
+        gaptxt = '<div class="gap gaptxt">Market has not opened this game yet</div>'
     v = str(r["verdict"])
     note = ""
     fav = r["home"] if pm >= 0.5 else r["away"]
@@ -373,7 +670,9 @@ def game_card(r):
                         f'{mkt_fav}, but not by enough to beat the price after '
                         f'fees. No bet.')
         if note:
-            note = f'<div class="gap">{note}</div>'
+            note = f'<div class="gap notetxt">{note}</div>'
+    if not note:
+        note = '<div class="gap notetxt" hidden></div>'
     spread_row = ""
     sl = r.get("spread_line")
     if sl is not None and not pd.isna(sl):
@@ -391,14 +690,19 @@ def game_card(r):
                       f'{fav_line(sl, r["home"], r["away"])}): model covers '
                       f'<b>{side} {line}</b> {p*100:.0f}% of the time &middot; '
                       f'fair price {american(p)} &middot; {tag}</div>')
-    return (f'<div class="card"><div class="match"><span class="teams">{r["away"]} @ '
+    return (f'<div class="card gcard tier-{verdict_tier(v)}" '
+            f'data-keys="{kalshi_lookup(r["away"], r["home"])}" '
+            f'data-away="{r["away"]}" data-home="{r["home"]}" '
+            f'data-p="{pm:.6f}">'
+            f'<div class="match"><span class="teams">{r["away"]} @ '
             f'{r["home"]}</span><span class="date">{r["date"]}</span></div>'
             f'<div class="call">{call}</div><div class="gline">{gline}</div>'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}{spread_row}{note}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
                stats_path="team_game_stats.csv", db_path="kalshi_prices.db",
-               horizon_days=8, edge_threshold=0.04):
+               horizon_days=8, edge_threshold=0.04,
+               prices_url=DEFAULT_PRICES_URL, mlb_feed=DEFAULT_MLB_FEED):
     df = rd.build_frame(games_path, stats_path)
     hist, by_season, calib = history_tables(df)
 
@@ -434,7 +738,7 @@ def build_site(out_path="site.html", games_path="games.csv",
                 hrs = _age.total_seconds() / 3600
                 stale = (' <span style="color:var(--yellow)">(getting old; run the '
                          'logger for fresh prices)</span>' if hrs > 24 else "")
-                price_age = (f'<p class="sub">Market prices last logged: '
+                price_age = (f'<p class="sub" id="price-age">Market prices last logged: '
                              f'{pd.Timestamp(_ts).strftime("%b %d, %H:%M UTC")}, '
                              f'about {hrs:.0f}h ago{stale}. "No price yet" means no '
                              f'price existed in that snapshot; the market may have '
@@ -469,6 +773,26 @@ def build_site(out_path="site.html", games_path="games.csv",
 
     cards = "".join(game_card(r) for r in week_rows) or \
         '<p class="sub">No games in the upcoming window.</p>'
+
+    if not price_age:
+        price_age = ('<p class="sub" id="price-age">Market prices load from the '
+                     'live feed.</p>')
+
+    tier_bar = ""
+    if week_rows:
+        counts = Counter(verdict_tier(str(r["verdict"])) for r in week_rows)
+        btns = ['<button id="tier-all" class="bandbtn on" '
+                "onclick=\"tier('all')\">All"
+                f'<span class="cnt">{len(week_rows)}</span></button>']
+        for key, label in TIER_BUTTONS:
+            n = counts.get(key, 0)
+            dis = "" if n else " disabled"
+            btns.append(f'<button id="tier-{key}" class="bandbtn"{dis} '
+                        f"onclick=\"tier('{key}')\">{label}"
+                        f'<span class="cnt">{n}</span></button>')
+        tier_bar = (f'<div class="bandbar" id="week-tiers">{"".join(btns)}</div>'
+                    '<p class="nomatch" id="week-empty" style="display:none">'
+                    'No games in that tier this week.</p>')
 
 
     srows = "".join(
@@ -515,11 +839,15 @@ def build_site(out_path="site.html", games_path="games.csv",
     html = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NFL Model HQ</title><style>{CSS}</style>
-<script>{TABS_JS}</script></head><body>
+<script>{TABS_JS}</script>
+<script>var PRICES_URL={prices_url!r};var MLB_FEED_URL={mlb_feed!r};</script>
+<script>{PRICES_JS}</script>
+<script>{MLB_JS}</script></head><body>
 <nav><button id="b-week" class="on" onclick="tab('week')">This Week</button>
 <button id="b-parlays" onclick="tab('parlays')">Parlay Lab</button>
 <button id="b-record" onclick="tab('record')">Track Record</button>
-<button id="b-b101" onclick="tab('b101')">Bayesian 101</button></nav>
+<button id="b-b101" onclick="tab('b101')">Bayesian 101</button>
+<button id="b-mlb" onclick="tab('mlb')">MLB</button></nav>
 <div class="wrap">
 <h1>NFL <span>Model</span> HQ</h1>
 <p class="sub">A Bayesian margin model &middot; generated {today.date()}</p>
@@ -532,7 +860,7 @@ after fees, yellow means an edge too small to trust, red means the price is fair
 or worse. Each card also grades the Vegas spread: the model's chance of covering
 each side, and whether that beats the 52.4% needed to profit at a standard -110.
 Every green light still gets a human news check first.</p>
-{week_note}{price_age}<div class="grid">{cards}</div>
+{week_note}{price_age}{tier_bar}<div class="grid">{cards}</div>
 </div>
 
 <div id="parlays" class="panel">
@@ -556,7 +884,7 @@ it many times. Positive means the model thinks you are being paid to take the
 bet; negative means you are paying for the entertainment. Legs
 are independent games only, and parlays multiply the house's cut as well as the
 thrill.</p>
-<div class="bandbar">
+<div class="bandbar" id="parlay-bands">
 <button id="band-safe" class="bandbtn" onclick="band('safe')">Safe &le;+120</button>
 <button id="band-balanced" class="bandbtn" onclick="band('balanced')">Balanced</button>
 <button id="band-long" class="bandbtn" onclick="band('long')">Longshot</button>
@@ -598,6 +926,23 @@ confidence is honest.</p>
 {"".join(season_blocks)}
 </div>
 
+<div id="mlb" class="panel">
+<h2>MLB &middot; from GooseLine</h2>
+<p class="sub">This tab is not my model. It is <a href="https://jdev-02.github.io/gooseline-model-hq/"
+style="color:var(--green)">GooseLine Solutions' MLB model</a>, loaded live from
+their public data when this page opens. I do not build, tune, or vouch for the
+baseball numbers; they are here so both sports sit in one place. Read the bars
+the same way as the NFL tab: green is the model's chance the home team wins,
+white is what the market charges. Baseball is much closer to a coin flip than
+football, so edges are smaller and rarer, and the same rule applies: a green
+badge is a starting point for a news check, not a bet.</p>
+<p class="sub" id="mlb-meta"></p>
+<div class="grid" id="mlb-slate"><p class="sub">Loading the GooseLine feed&hellip;</p></div>
+<p class="sub" style="margin-top:14px">Source:
+<a href="https://github.com/jdev-02/gooseline-model-hq" style="color:var(--green)">jdev-02/gooseline-model-hq</a>.
+Their model, their data, their call; this page only displays it.</p>
+</div>
+
 <div id="b101" class="panel">
 <h2>Bayesian 101</h2>{B101}
 </div>
@@ -621,5 +966,11 @@ if __name__ == "__main__":
     ap.add_argument("--stats", default="team_game_stats.csv")
     ap.add_argument("--db", default="kalshi_prices.db")
     ap.add_argument("--days", type=int, default=8)
+    ap.add_argument("--mlb-feed", default=DEFAULT_MLB_FEED,
+                    help="CSV feed for the read-only MLB tab; empty to disable")
+    ap.add_argument("--prices-url", default=DEFAULT_PRICES_URL,
+                    help="URL the published page polls for live Kalshi prices; "
+                         "pass an empty string to disable the fast layer")
     args = ap.parse_args()
-    build_site(args.out, args.games, args.stats, args.db, args.days)
+    build_site(args.out, args.games, args.stats, args.db, args.days,
+               prices_url=args.prices_url, mlb_feed=args.mlb_feed)
