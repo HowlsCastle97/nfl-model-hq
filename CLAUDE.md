@@ -88,7 +88,16 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
 
 1. `kalshi_logger.py` runs every 10 minutes from a Windows Task Scheduler entry
    named "Kalshi NFL price logger", which calls `run_kalshi_logger.cmd` (locates
-   the repo via `%~dp0`, appends to `logs/`, gitignored). Register or change it
+   the repo via `%~dp0`, appends to `logs/`, gitignored). The same run then
+   republishes the public price feed with `publish_prices.py --push`, because
+   **this machine is the primary publisher, not GitHub Actions**: the "every 5
+   minutes" workflow is best-effort cron and was measured delivering roughly
+   every 30 minutes, with a 57 minute gap on 2026-09-07. The workflow stays
+   enabled as a backstop for when this machine is off. Both force-push a single
+   orphan commit to the `prices` branch, so whichever ran last wins and no
+   history accumulates. The local push uses git plumbing (hash-object, mktree,
+   commit-tree) rather than the workflow's orphan checkout, because a checkout
+   racing a real edit on the development machine could lose work. Register or change it
    with `install_logger_task.ps1`, **from an elevated PowerShell**: without
    elevation S4U fails with "Access is denied" and it falls back to a task that
    only runs while you are signed in. Price history is unrecoverable, so nothing

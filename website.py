@@ -465,10 +465,18 @@ function applyPrices(){
       var when = age < 1 ? 'just now'
                : age < 60 ? Math.round(age) + ' min ago'
                : (age / 60).toFixed(1) + ' h ago';
-      var warn = age > 90
-        ? ' <span style="color:var(--yellow)">(the price feed has stalled)</span>'
+      /* The feed is republished every 10 minutes by the logging machine, with
+         a GitHub Actions job as a backstop. Anything past 20 minutes means the
+         primary publisher is down, so the page stops calling itself live rather
+         than dressing up an old number: a reader deciding on a price deserves
+         to know it is not the current one. 45 minutes is a stall. */
+      var warn = age > 45
+        ? ' <span style="color:var(--yellow)">(the price feed has stalled; ' +
+          'treat these as indicative and check the market yourself)</span>'
         : '';
-      el.innerHTML = 'Market prices are live: updated <b>' + when + '</b> for ' + n +
+      var lead = age < 20 ? 'Market prices are live: updated <b>'
+                          : 'Market prices are not current: last updated <b>';
+      el.innerHTML = lead + when + '</b> for ' + n +
         ' of ' + document.querySelectorAll('.gcard').length +
         ' games. Model probabilities are from the last full rebuild.' + warn;
     }
@@ -932,7 +940,10 @@ def build_site(out_path="site.html", games_path="games.csv",
 
     if not price_age:
         price_age = ('<p class="sub" id="price-age">Market prices load from the '
-                     'live feed.</p>')
+                     'live feed, republished every 10 minutes. If this line '
+                     'still says this after the page has loaded, the feed did '
+                     'not answer and the prices shown are from the last '
+                     'rebuild.</p>')
 
     tier_bar = ""
     if week_rows:

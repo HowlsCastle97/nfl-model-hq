@@ -18,7 +18,9 @@ a game with the same alias candidates the build used.
 """
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -81,10 +83,59 @@ def build_payload(markets):
             "events": events}
 
 
+def publish_to_branch(path, ts, branch="prices", remote="origin", repo=None):
+    """Force-push one file to a single-commit orphan branch, via plumbing only.
+
+    The GitHub workflow publishes by checking out an orphan branch, which is
+    fine on a throwaway runner. It would be unacceptable here: this runs on the
+    development machine every 10 minutes, and a checkout that raced a real edit
+    could lose work. So the blob, tree and commit are built directly and only
+    the remote ref moves. HEAD, the index and the working tree are never read
+    or written, and the branch stays exactly one commit deep because
+    commit-tree is given no parent.
+
+    Both publishers force-push, so whichever ran last simply wins; there is no
+    conflict to resolve and no history to accumulate.
+    """
+    repo = repo or os.path.dirname(os.path.abspath(__file__))
+    env = dict(os.environ,
+               # In a Task Scheduler service context there is no console, so a
+               # credential prompt would hang until the task timed out. Fail
+               # fast and loudly instead.
+               GIT_TERMINAL_PROMPT="0",
+               GCM_INTERACTIVE="never")
+
+    def git(*args, stdin=None):
+        # stdin is passed as bytes on purpose. In text mode Python translates
+        # "\n" to os.linesep on write, which on Windows put a carriage return
+        # inside the mktree entry and published the file as "prices.json\r".
+        # The branch looked fine and the raw URL 404'd.
+        r = subprocess.run(("git",) + args, cwd=repo, input=stdin, env=env,
+                           capture_output=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(f"git {' '.join(args)}: "
+                               f"{r.stderr.decode(errors='replace').strip()}")
+        return r.stdout.decode(errors="replace").strip()
+
+    blob = git("hash-object", "-w", os.path.abspath(path))
+    # mktree wants: <mode> SP <type> SP <sha> TAB <name> LF, and that LF must
+    # survive as a bare LF, hence the explicit encode.
+    tree = git("mktree", stdin=f"100644 blob {blob}\tprices.json\n".encode())
+    commit = git("commit-tree", tree, "-m", f"prices {ts}")
+    git("push", "--force", remote, f"{commit}:refs/heads/{branch}")
+    return commit
+
+
 def main():
     ap = argparse.ArgumentParser(description="Publish current Kalshi NFL prices as JSON")
     ap.add_argument("--out", default="prices.json")
     ap.add_argument("--series", default=SERIES)
+    ap.add_argument("--push", action="store_true",
+                    help="force-push the result to the single-commit prices "
+                         "branch (used by the local scheduled task; the GitHub "
+                         "workflow does its own equivalent push)")
+    ap.add_argument("--branch", default="prices")
+    ap.add_argument("--remote", default="origin")
     args = ap.parse_args()
     try:
         markets = fetch_markets(requests.Session(), args.series)
@@ -98,6 +149,19 @@ def main():
         json.dump(payload, f, separators=(",", ":"), sort_keys=True)
     n = sum(len(v) for v in payload["events"].values())
     print(f"{args.out}: {len(payload['events'])} events, {n} markets, ts {payload['ts']}")
+    if not n:
+        # An empty feed would blank every market bar on the page. Better to
+        # leave the last good prices standing than to publish nothing.
+        print("refusing to publish an empty feed", file=sys.stderr)
+        return 1
+    if args.push:
+        try:
+            commit = publish_to_branch(args.out, payload["ts"],
+                                       branch=args.branch, remote=args.remote)
+            print(f"published {commit[:9]} to {args.remote}/{args.branch}")
+        except Exception as e:
+            print(f"publish failed: {e}", file=sys.stderr)
+            return 2
     return 0
 
 
