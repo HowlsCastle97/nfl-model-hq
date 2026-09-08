@@ -5,3 +5,6 @@ __pycache__/
 fake_*.db
 site*.html
 old_schema.db
+
+# Logger output; the price history itself is kalshi_prices.db above.
+logs/
