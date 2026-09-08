@@ -36,7 +36,9 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   (fee = 0.07*p*(1-p)), Kalshi team aliases (LA<->LAR, etc.).
 - `kalshi_logger.py`: polls Kalshi public API
   (https://external-api.kalshi.com/trade-api/v2), series KXNFLGAME, KXNFLSPREAD,
-  KXNFLTOTAL (TOTAL ticker unverified), writes timestamped snapshots to
+  KXNFLTOTAL (all three verified live 2026-09-07: SPREAD and TOTAL both carry a
+  numeric `floor_strike` plus a subtitle naming the team or the total, and
+  markets open weeks before kickoff), writes timestamped snapshots to
   `kalshi_prices.db` (gitignored; irreplaceable local data, never commit).
   Handles dollar-string and integer-cent price fields; schema self-migrates.
 - `website.py`: builds the entire public site as one self-contained HTML file
@@ -56,7 +58,17 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
    the credible bands (they go to Moonshot with a warning), states the 52.4% ATS
    break-even, and shows calibration receipts. Keep this tone in any new copy.
 4. Big model-market disagreements are treated as the model missing news, not
-   free money ("square-3 rule"). Value verdicts require edge after fees.
+   free money ("square-3 rule"). Value verdicts require edge after fees. The
+   rule is measured in units of the model's own predictive sd, not probability:
+   `square3_gap` in `website.py` is the difference of probits, since
+   p = Phi(mu/sigma) on both sides, thresholded at `SQUARE3_SIGMAS = 0.40`.
+   Probability was the wrong yardstick because a fixed 0.15 gap is 0.39 sigma at
+   an even price but 1.81 sigma at 0.90, so it barely applied to lopsided games.
+   0.40 reproduces the old rule at a coin-flip price. The moneyline gap is taken
+   against the Kalshi price, the spread gap against the Vegas line (a fair line
+   implies a 50% cover, so that gap is just probit(p_cover)). Both the card
+   caveat and the Parlay Lab wild-leg flag use this one function, and the page JS
+   mirrors it so the caution survives a live price refresh.
 5. Everything on the site is from the home team's perspective; gambler
    translations accompany technical numbers ("SEA -2", ML odds).
 6. Dave's writing preference: no em dashes or hyphens as sentence punctuation in
@@ -74,8 +86,16 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
 
 ## Weekly operating ritual (keep working)
 
-1. `kalshi_logger.py` runs continuously or via Task Scheduler `--once` every 10
-   minutes (price history is unrecoverable; protect this).
+1. `kalshi_logger.py` runs every 10 minutes from a Windows Task Scheduler entry
+   named "Kalshi NFL price logger", which calls `run_kalshi_logger.cmd` (locates
+   the repo via `%~dp0`, appends to `logs/`, gitignored). Register or change it
+   with `install_logger_task.ps1`, **from an elevated PowerShell**: without
+   elevation S4U fails with "Access is denied" and it falls back to a task that
+   only runs while you are signed in. Price history is unrecoverable, so nothing
+   here should ever be left to a hand-run terminal: that is exactly how 11 days
+   went missing in August 2026, silently, because nothing reports a dead logger.
+   Check `Get-ScheduledTaskInfo -TaskName "Kalshi NFL price logger"` (a
+   LastTaskResult of 0 is success) before suspecting the script.
 2. Sunday: refresh `games.csv` from nflverse raw GitHub URL, run
    `python website.py --out docs/index.html`, commit and push (Pages
    redeploys automatically).

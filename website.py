@@ -24,8 +24,37 @@ def dec_from_american(a):
     return 1 + (a / 100 if a > 0 else 100 / -a)
 
 
+def half_point(mu):
+    """The model's margin rounded to the nearest half point.
+
+    Lines are quoted in half points, so this is the model's number expressed in
+    the unit a bettor actually sees. The headline and the quoted line both come
+    from here: deriving them separately is what let a margin of 5.3 print as
+    "by 5" and "-5.5" on the same card.
+    """
+    return round(mu * 2) / 2
+
+
+# Square-3 rule. A disagreement big enough that the likelier explanation is the
+# model missing news, not the market mispricing. Measured in units of the
+# model's own predictive standard deviation, which for a Gaussian predictive
+# margin is simply the difference of probits, since p = Phi(mu / sigma) on both
+# sides. Probability is the wrong yardstick: a 0.15 gap is 0.39 sigma at an even
+# price but 1.81 sigma at 0.90, so a fixed probability threshold barely applied
+# to lopsided games at all. 0.40 is set to agree with the old 0.15 rule at a
+# coin-flip price, which is where that rule was calibrated.
+SQUARE3_SIGMAS = 0.40
+
+
+def square3_gap(p_model, p_market):
+    """Model minus market for one side, in the model's own predictive sigmas."""
+    lo, hi = 1e-6, 1 - 1e-6
+    return float(norm.ppf(min(max(p_model, lo), hi))
+                 - norm.ppf(min(max(p_market, lo), hi)))
+
+
 def fav_line(mu, home, away):
-    s = round(mu * 2) / 2
+    s = half_point(mu)
     if s == 0:
         return "pick'em"
     team = home if s > 0 else away
@@ -87,15 +116,20 @@ def build_parlays(upcoming_rows, top_n=10):
             if 0.02 < price < 0.98:
                 legs.append({"game": f"{r['away']}@{r['home']}", "desc": f"{side} ML",
                              "p": p, "dec": 1 / (price + rd.kalshi_fee(price)),
-                             "wild": (p - price) > 0.15})
+                             "wild": square3_gap(p, price) > SQUARE3_SIGMAS})
         sl = r.get("spread_line")
         if sl is not None and not pd.isna(sl):
             p_cover_home = norm.cdf((mu - sl) / sigma)
             side, p = ((r["home"], p_cover_home) if p_cover_home >= 0.5
                        else (r["away"], 1 - p_cover_home))
             line = f"-{abs(sl):g}" if (side == r["home"]) == (sl > 0) else f"+{abs(sl):g}"
+            # The line itself is the market's view of the margin, so a fair
+            # line implies a 50% cover and the disagreement is just probit(p).
+            # This leg used to be hardcoded wild=False, which let the model's
+            # most extreme spread opinions into the credible bands unflagged.
             legs.append({"game": f"{r['away']}@{r['home']}", "desc": f"{side} {line}",
-                         "p": p, "dec": SPREAD_JUICE, "wild": False})
+                         "p": p, "dec": SPREAD_JUICE,
+                         "wild": square3_gap(p, 0.5) > SQUARE3_SIGMAS})
     parlays = []
     for k in (2, 3):
         for combo in itertools.combinations(legs, k):
@@ -174,6 +208,7 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .bval{text-align:right;font-variant-numeric:tabular-nums}
 .gap{font-size:.72rem;margin-top:5px;color:var(--dim)}
 .gap b{font-variant-numeric:tabular-nums}
+.sq3{color:var(--yellow)}
 .verdict{display:inline-block;margin-top:7px;padding:2px 10px;border-radius:99px;
   font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
 .v-high{background:var(--green);color:#08120b}
@@ -247,6 +282,46 @@ PRICES_JS = """
 var TIERS = ['high', 'small', 'none', 'nopr'];
 var TIER_CLS = {high: 'v-high', small: 'v-caut', none: 'v-avoid', nopr: 'v-none'};
 function feeOf(p){ return 0.07 * p * (1 - p); }
+/* Square-3 threshold, in units of the model's own predictive sd. Must match
+   SQUARE3_SIGMAS in website.py: the card would otherwise caution at build time
+   and stop cautioning the moment prices refreshed. */
+var SQUARE3_SIGMAS = 0.40;
+/* Inverse normal CDF (Acklam's rational approximation). Needed because the
+   disagreement is measured in sigmas, and for a Gaussian predictive margin that
+   is the difference of probits. Accurate to ~1e-9, far beyond what a caution
+   threshold needs. */
+function probit(p){
+  if (p <= 0) return -38; if (p >= 1) return 38;
+  var a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+           1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00],
+      b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+           6.680131188771972e+01, -1.328068155288572e+01],
+      c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+           -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00],
+      d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+           3.754408661907416e+00];
+  var lo = 0.02425, q, r;
+  if (p < lo){
+    q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+           ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
+  }
+  if (p > 1 - lo){
+    q = Math.sqrt(-2 * Math.log(1 - p));
+    return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+            ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
+  }
+  q = p - 0.5; r = q * q;
+  return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5]) * q /
+         (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);
+}
+/* Mirrors square3_text() in website.py word for word. */
+function square3Text(z, sigma){
+  return 'Model and market are about <b>' + Math.round(z * sigma) +
+    '</b> points apart on this game, against a typical miss of &plusmn;' +
+    Math.round(sigma) + '. A gap that size usually means the model has not seen ' +
+    'some news, so check injuries and inactives before acting on the pick above.';
+}
 function tierOfVerdict(v){
   if (v.indexOf('HIGH VALUE') === 0) return 'high';
   if (v.indexOf('CAUTIOUS') === 0) return 'small';
@@ -350,6 +425,21 @@ function applyCard(card, events){
     if (card.dataset.sp) picks.push(card.dataset.sp);
     plist.innerHTML = picks.length ? picks.join(' &middot; ')
       : '<span class="pnone">No recommended play</span>';
+  }
+  /* The moneyline gap moves with the price, so the caution has to move with it
+     too. The spread gap is model versus the Vegas line and rides in data-zsp. */
+  var sq = card.querySelector('.sq3');
+  if (sq){
+    var vModel = side === home ? pm : 1 - pm;
+    var vMkt = side === home ? hAsk : aAsk;
+    var zMl = (vMkt == null || !picks.length) ? 0 : probit(vModel) - probit(vMkt);
+    var zMax = Math.max(zMl, parseFloat(card.dataset.zsp || '0'));
+    if (zMax > SQUARE3_SIGMAS){
+      sq.innerHTML = square3Text(zMax, parseFloat(card.dataset.sigma));
+      sq.hidden = false;
+    } else {
+      sq.hidden = true;
+    }
   }
   TIERS.forEach(function(x){ card.classList.remove('tier-' + x); });
   card.classList.add('tier-' + t);
@@ -621,10 +711,24 @@ def verdict_badge(v):
     return '<span class="verdict v-none">No price yet</span>'
 
 
+def square3_text(z, sigma):
+    """Caution copy for a square-3 sized disagreement, in points a bettor reads."""
+    if z <= SQUARE3_SIGMAS:
+        return ""
+    return (f'Model and market are about <b>{z * sigma:.0f}</b> points apart on '
+            f'this game, against a typical miss of &plusmn;{sigma:.0f}. A gap '
+            f'that size usually means the model has not seen some news, so check '
+            f'injuries and inactives before acting on the pick above.')
+
+
 def game_card(r):
     mu, sigma, pm = r["mu"], r["sigma"], r["p_home"]
-    call = (f"Bayesian Model: <b>{r['home']} by {abs(mu):.0f}</b>" if mu >= 0
-            else f"Bayesian Model: <b>{r['away']} by {abs(mu):.0f}</b>")
+    s_line = half_point(mu)
+    if s_line == 0:
+        call = "Bayesian Model: <b>pick'em</b>"
+    else:
+        call = (f"Bayesian Model: <b>{r['home'] if s_line > 0 else r['away']} "
+                f"by {abs(s_line):g}</b>")
     call += f" &plusmn;{sigma:.0f}"
     fav0 = r["home"] if pm >= 0.5 else r["away"]
     fav_p = pm if pm >= 0.5 else 1 - pm
@@ -633,6 +737,7 @@ def game_card(r):
              f'fair ML for {fav0} <b>{american(fav_p)}</b>')
     v0 = str(r.get("verdict", ""))
     ml_pick = ""
+    vside = ""
     if "&mdash;" in v0 and (v0.startswith("HIGH VALUE") or v0.startswith("CAUTIOUS")):
         vside = v0.split("&mdash;")[-1].strip().replace("small edge on ", "")
         ml_pick = f'{vside} ML' + ('' if v0.startswith("HIGH VALUE")
@@ -650,6 +755,20 @@ def game_card(r):
         sp_ln = (f"-{abs(sl):g}" if (sp_side == r["home"]) == (sl > 0)
                  else f"+{abs(sl):g}")
     sp_pick = f"{sp_side} {sp_ln}" if sp_side is not None and sp_p >= 0.58 else ""
+    # Square-3 measured against whichever markets the picks actually face: the
+    # Kalshi price for the moneyline, the Vegas line for the spread. Two markets,
+    # so two gaps, and the louder one drives the caution.
+    mkt_h = r.get("mkt_home")
+    has_mkt = mkt_h is not None and not pd.isna(mkt_h)
+    z_ml = 0.0
+    if ml_pick and has_mkt:
+        v_model = pm if vside == r["home"] else 1 - pm
+        v_mkt = float(mkt_h) if vside == r["home"] else 1 - float(mkt_h)
+        z_ml = square3_gap(v_model, v_mkt)
+    z_sp = square3_gap(sp_p, 0.5) if sp_pick else 0.0
+    z_max = max(z_ml, z_sp)
+    sq3_row = (f'<div class="gap sq3"{"" if z_max > SQUARE3_SIGMAS else " hidden"}>'
+               f'{square3_text(z_max, sigma)}</div>')
     picks = [x for x in (ml_pick, sp_pick) if x]
     picks_row = ('<div class="picks"><span class="plab">Recommended picks</span>'
                  '<span class="plist">'
@@ -728,11 +847,12 @@ def game_card(r):
     return (f'<div class="card gcard tier-{verdict_tier(v)}" '
             f'data-keys="{kalshi_lookup(r["away"], r["home"])}" '
             f'data-away="{r["away"]}" data-home="{r["home"]}" '
-            f'data-sp="{sp_pick}" data-p="{pm:.6f}">'
+            f'data-sp="{sp_pick}" data-zsp="{z_sp:.4f}" '
+            f'data-sigma="{sigma:.3f}" data-p="{pm:.6f}">'
             f'<div class="match"><span class="teams">{r["away"]} @ '
             f'{r["home"]}</span><span class="date">{r["date"]}</span></div>'
             f'<div class="call">{call}</div><div class="gline">{gline}</div>'
-            f'{picks_row}'
+            f'{picks_row}{sq3_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}{spread_row}{note}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
