@@ -49,6 +49,45 @@ def fit_models(df, asof_season):
     return lin, ens
 
 
+def neutral_row(train_X):
+    """The value of each input for a game where that input says nothing.
+
+    Every feature in V3_COLS except one is a home-minus-away difference or a
+    flag, so zero genuinely means "these two teams are level here" or "this does
+    not apply". kalman_var is the exception: it is a sum of two variances and is
+    never zero, so its neutral is the training median, meaning "the filter knows
+    these teams about as well as it knows anyone".
+    """
+    neu = np.zeros(train_X.shape[1], dtype=float)
+    for i, col in enumerate(V3_COLS):
+        if col == "kalman_var":
+            neu[i] = float(np.median(train_X[:, i]))
+    return neu
+
+
+def feature_contributions(model, X, neutral):
+    """Points of margin attributable to each input, per game.
+
+    Each number is the deployed model evaluated twice: once on the game as it
+    is, once with a single input replaced by its neutral value. So every figure
+    is a true statement about the ensemble that produced the prediction on the
+    page, not a linear surrogate fitted alongside it. That matters here: the
+    site's mu comes from the deep ensemble, so ridge coefficients would explain
+    a number the reader is not being shown.
+
+    The price of that honesty is that the parts do not sum to the whole, because
+    a network is not additive. The page says so rather than quietly rescaling
+    them into a tidy total that would misrepresent the model.
+    """
+    base = model.predict_split(X)[0]
+    out = np.zeros((X.shape[0], X.shape[1]), dtype=float)
+    for j in range(X.shape[1]):
+        Xj = X.copy()
+        Xj[:, j] = neutral[j]
+        out[:, j] = base - model.predict_split(Xj)[0]
+    return out
+
+
 def latest_prices(db_path):
     if not db_path or not os.path.exists(db_path):
         return {}

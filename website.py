@@ -188,8 +188,34 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .teams{font-family:"Arial Narrow",sans-serif;font-size:1.05rem;font-weight:700;
   text-transform:uppercase;letter-spacing:.02em}
 .date{color:var(--dim);font-size:.75rem}
-.call{font-size:.83rem;margin:5px 0 2px}
-.gline{color:var(--white);font-size:.8rem;margin-bottom:5px}
+/* Model line and market line: same shape, values right aligned so the two
+   numbers sit directly above one another and compare at a glance. */
+.lrow{display:grid;grid-template-columns:1fr auto;align-items:baseline;
+  gap:8px;padding:1px 0}
+.llab{color:var(--dim);font-size:.71rem;text-transform:uppercase;
+  letter-spacing:.04em}
+.lval{font-size:.98rem;font-weight:700;color:var(--green);
+  font-variant-numeric:tabular-nums}
+.lval.vval{color:var(--white)}
+.lnote{grid-column:1/-1;justify-self:end;color:var(--dim);font-size:.67rem}
+/* The model's outright call, always shown, value or not. */
+.overall{margin:8px 0 0;padding:7px 9px;border-radius:7px;font-size:.78rem;
+  line-height:1.42;background:#3fb95018;border-left:3px solid var(--green)}
+.overall b{color:var(--green)}
+.reason{background:none;border:1px solid var(--line);border-radius:8px;
+  padding:5px 9px;margin:9px 0 0;overflow-x:auto}
+.reason summary{font-size:.75rem;color:var(--green);font-weight:600}
+.rlead{color:var(--dim);font-size:.68rem;margin:6px 0 5px;line-height:1.35}
+.rtab{width:100%;border-collapse:collapse;font-size:.7rem;margin:0}
+.rtab td{padding:3px 4px;border-bottom:1px solid #17201850;vertical-align:top}
+.rpull{white-space:nowrap;font-weight:700;font-variant-numeric:tabular-nums}
+.rhome{color:var(--green)}
+.raway{color:var(--white)}
+.rnil{color:var(--dim);font-weight:400}
+.rname{white-space:nowrap;color:var(--white)}
+.rval{display:block;color:var(--dim);font-weight:400;
+  font-variant-numeric:tabular-nums}
+.rdesc{color:var(--dim);line-height:1.3}
 .picks{margin:0 0 9px}
 .picks .plab{display:block;font-size:.68rem;font-weight:600;color:var(--dim);
   text-transform:uppercase;letter-spacing:.05em;margin-bottom:1px}
@@ -330,27 +356,33 @@ function tierOfVerdict(v){
 }
 /* Same three cases as game_card's Python prose, kept in step deliberately: if
    these ever diverge the page would explain a verdict it is not showing. */
-function noteFor(t, side, fav, mktFav, soft){
+/* Mirrors overall_text() in website.py case for case. It leads with the
+   model's outright call every time, including when nothing is worth betting,
+   because that call is the thing a reader most often wants and it is worth
+   tracking whether or not it ever carried an edge. */
+function overallText(fav, favP, t, side, mktFav){
+  var call = 'Model makes <b>' + fav + '</b> the winner <b>' +
+             Math.round(favP * 100) + '%</b> of the time';
   if (t === 'none'){
     return fav === mktFav
-      ? ('The model and the market see this game the same way: <b>' + fav +
-         '</b> likely wins, and the price already says so. Fair price, no bet.')
-      : ('The model leans <b>' + fav + '</b> while the market leans ' + mktFav +
-         ', but not by enough to beat the price after fees. No bet.');
+      ? (call + ', and the market prices it about the same. Fair price, ' +
+         'nothing to bet.')
+      : (call + ', against a market that leans ' + mktFav + ', but not by ' +
+         'enough to beat the price after fees. Nothing to bet.');
   }
+  var soft = t === 'high' ? '' : ' The edge is small, so treat it lightly.';
   if (side !== fav){
-    return ('For value: the model still expects <b>' + fav + '</b> to win, but ' +
-            'the market charges too much for ' + fav + '. The value play is <b>' +
-            side + '</b>: buying the underpriced side, not picking the winner.' + soft);
+    return (call + ', but the market charges too much for ' + fav + ' to be ' +
+            'worth backing. The value is in <b>' + side + '</b> instead: buying ' +
+            'the underpriced side, not picking the winner.' + soft);
   }
   if (side === mktFav){
-    return ('For value: the model and the market agree <b>' + side + '</b> is the ' +
-            'likely winner, but the model is more confident than the price ' +
-            'implies. The value play is <b>' + side + '</b>.' + soft);
+    return (call + ', and the market agrees on the winner but is not as ' +
+            'confident, so <b>' + side + '</b> is underpriced.' + soft);
   }
-  return ('For value: the model calls an upset. It makes <b>' + side + '</b> the ' +
-          'favorite while the market does not, so ' + side + ' comes cheap if the ' +
-          'model is right. The value play is <b>' + side + '</b>.' + soft);
+  return (call + ', which the market does not: it makes ' + mktFav +
+          ' the favourite, so <b>' + side + '</b> comes cheap if the model is ' +
+          'right.' + soft);
 }
 function recountTiers(){
   var counts = {high: 0, small: 0, none: 0, nopr: 0}, total = 0;
@@ -408,10 +440,10 @@ function applyCard(card, events){
       (g > 0 ? 'toward ' : 'against ') + home;
   }
   var fav = pm >= 0.5 ? home : away;
+  var favP = pm >= 0.5 ? pm : 1 - pm;
   var mktFav = hAsk >= 0.5 ? home : away;
-  var soft = t === 'high' ? '' : ' The edge is small, so treat this one lightly.';
-  var note = card.querySelector('.notetxt');
-  if (note){ note.innerHTML = noteFor(t, side, fav, mktFav, soft); note.hidden = false; }
+  var note = card.querySelector('.overall');
+  if (note){ note.innerHTML = overallText(fav, favP, t, side, mktFav); }
   var badge = card.querySelector('.verdict');
   if (badge){ badge.className = 'verdict ' + TIER_CLS[t]; badge.innerHTML = verdict; }
   /* The picks row is the loudest thing on the card, so it has to move with the
@@ -729,20 +761,138 @@ def square3_text(z, sigma):
             f'injuries and inactives before acting on the pick above.')
 
 
+# Display name and plain-English meaning for every input, keyed by the column
+# name in rd.V3_COLS. Same wording as the stat sheet in Bayesian 101, so a
+# reader who learns the term in one place recognises it in the other.
+FEATURE_INFO = {
+    "kalman_diff": ("Kalman rating gap",
+                    "Team strength difference, points on a neutral field"),
+    "kalman_var": ("Rating uncertainty",
+                   "How well the filter currently knows both teams"),
+    "pdiff_ewma_diff": ("Scoring form",
+                        "Recent point differential, recent games weighted more"),
+    "off_pass_diff": ("Passing offence, EPA",
+                      "Expected Points Added per dropback: how much each play "
+                      "helped, given down, distance and field position"),
+    "off_rush_diff": ("Rushing offence, EPA",
+                      "Expected Points Added per carry. Credits efficiency, "
+                      "not raw yards"),
+    "def_pass_diff": ("Pass defence, EPA",
+                      "Expected Points Added given up per opponent dropback"),
+    "def_rush_diff": ("Rush defence, EPA",
+                      "Expected Points Added given up per opponent carry"),
+    "cpoe_diff": ("CPOE",
+                  "Completion Percentage Over Expected: does the QB complete "
+                  "throws harder than they look"),
+    "rest_diff": ("Rest difference", "Days off, home minus away"),
+    "div_game": ("Division game",
+                 "Rivals play closer games than ratings suggest"),
+    "qb_fam_diff": ("QB continuity",
+                    "Share of the last 16 games started by this week's listed "
+                    "starter. A backup shows up as a 0"),
+    "indoor": ("Roof", "Indoors removes weather and tends to raise scoring"),
+}
+
+
+def feature_value(col, v):
+    """The raw input in the unit it is actually measured in."""
+    if col == "div_game":
+        return "yes" if v >= 0.5 else "no"
+    if col == "indoor":
+        return "indoor" if v >= 0.5 else "outdoor"
+    if col == "rest_diff":
+        return f"{v:+.0f} days"
+    if col == "kalman_var":
+        return f"{v:.0f}"
+    return f"{v:+.2f}"
+
+
+def reasoning_panel(cols, values, contribs, home, away, mu):
+    """Per-game breakdown of what is moving the prediction, biggest first.
+
+    Sorted by size rather than listed in column order, because the point is
+    immediacy: the reader should see the driver of this game in the first row
+    without reading the rest.
+    """
+    rows = sorted(zip(cols, values, contribs), key=lambda t: -abs(t[2]))
+    body = []
+    for col, val, c in rows:
+        label, desc = FEATURE_INFO.get(col, (col, ""))
+        if abs(c) < 0.05:
+            pull = '<span class="rnil">no effect</span>'
+        else:
+            team = home if c > 0 else away
+            cls = "rhome" if c > 0 else "raway"
+            pull = f'<span class="{cls}">{abs(c):.1f} to {team}</span>'
+        body.append(f'<tr><td class="rpull">{pull}</td>'
+                    f'<td class="rname">{label}<span class="rval">'
+                    f'{feature_value(col, val)}</span></td>'
+                    f'<td class="rdesc">{desc}</td></tr>')
+    # Same rounding as the line above it. Quoting mu to a different precision
+    # here is how "by 5" once ended up printed above "-5.5" on the same card.
+    s_line = half_point(mu)
+    side = home if s_line >= 0 else away
+    return (
+        '<details class="reason"><summary>Reasoning</summary>'
+        '<p class="rlead">What is tipping this game, biggest first. Each number '
+        'is how much the prediction would move if that one input were neutral '
+        'instead of what it is, measured on the same ensemble that produced the '
+        f'prediction above. They will not add up to the {abs(s_line):g} points '
+        f'on {side}: the model is a network, not a sum, so each input is '
+        'measured on its own.</p>'
+        f'<table class="rtab">{"".join(body)}</table></details>')
+
+
+def overall_text(fav, fav_p, tier, side, mkt_fav, has_price):
+    """One sentence: who the model likes outright, then whether that is buyable.
+
+    Always present, including when there is nothing to bet. A reader who wants
+    the model's outright opinion should not have to infer it from the absence of
+    a recommendation, and that opinion is worth tracking whether or not it ever
+    carried an edge.
+    """
+    call = f'Model makes <b>{fav}</b> the winner <b>{fav_p*100:.0f}%</b> of the time'
+    if not has_price:
+        return f'{call}. No market price yet, so there is nothing to compare it to.'
+    if tier == "none":
+        if fav == mkt_fav:
+            return (f'{call}, and the market prices it about the same. '
+                    f'Fair price, nothing to bet.')
+        return (f'{call}, against a market that leans {mkt_fav}, but not by '
+                f'enough to beat the price after fees. Nothing to bet.')
+    soft = "" if tier == "high" else " The edge is small, so treat it lightly."
+    if side != fav:
+        return (f'{call}, but the market charges too much for {fav} to be worth '
+                f'backing. The value is in <b>{side}</b> instead: buying the '
+                f'underpriced side, not picking the winner.' + soft)
+    if side == mkt_fav:
+        return (f'{call}, and the market agrees on the winner but is not as '
+                f'confident, so <b>{side}</b> is underpriced.' + soft)
+    return (f'{call}, which the market does not: it makes {mkt_fav} the '
+            f'favourite, so <b>{side}</b> comes cheap if the model is right.'
+            + soft)
+
+
 def game_card(r):
     mu, sigma, pm = r["mu"], r["sigma"], r["p_home"]
-    s_line = half_point(mu)
-    if s_line == 0:
-        call = "Bayesian Model: <b>pick'em</b>"
-    else:
-        call = (f"Bayesian Model: <b>{r['home'] if s_line > 0 else r['away']} "
-                f"by {abs(s_line):g}</b>")
-    call += f" &plusmn;{sigma:.0f}"
     fav0 = r["home"] if pm >= 0.5 else r["away"]
     fav_p = pm if pm >= 0.5 else 1 - pm
-    gline = (f'Model says the line should be: '
-             f'<b>{fav_line(mu, r["home"], r["away"])}</b> &middot; '
-             f'fair ML for {fav0} <b>{american(fav_p)}</b>')
+    # The model's line and the market's line, same shape and stacked, so the
+    # comparison is a glance rather than a sentence. These were two separately
+    # worded lines that between them said the number twice and never showed the
+    # thing it wanted comparing against.
+    sl = r.get("spread_line")
+    has_sl = sl is not None and not pd.isna(sl)
+    lines = (
+        f'<div class="lrow"><span class="llab">Model predicts the line '
+        f'should be</span><span class="lval">'
+        f'{fav_line(mu, r["home"], r["away"])}</span>'
+        f'<span class="lnote">&plusmn;{sigma:.0f} &middot; fair ML '
+        f'{american(fav_p)}</span></div>'
+        f'<div class="lrow"><span class="llab">Vegas market line</span>'
+        f'<span class="lval vval">'
+        f'{fav_line(sl, r["home"], r["away"]) if has_sl else "&mdash;"}</span>'
+        f'</div>')
     v0 = str(r.get("verdict", ""))
     ml_pick = ""
     vside = ""
@@ -753,10 +903,9 @@ def game_card(r):
     # The spread pick is computed once here because both the picks row and the
     # spread detail row below need it. It is model versus the Vegas line only,
     # so live Kalshi prices never change it; the page JS leaves it alone.
-    sl = r.get("spread_line")
     sp_side = sp_ln = None
     sp_p = 0.0
-    if sl is not None and not pd.isna(sl):
+    if has_sl:
         p_ch = norm.cdf((mu - sl) / sigma)
         sp_side, sp_p = ((r["home"], p_ch) if p_ch >= 0.5
                          else (r["away"], 1 - p_ch))
@@ -803,42 +952,20 @@ def game_card(r):
                    f'</div></div><span class="bval">&mdash;</span></div>')
         gaptxt = '<div class="gap gaptxt">Market has not opened this game yet</div>'
     v = str(r["verdict"])
-    note = ""
     fav = r["home"] if pm >= 0.5 else r["away"]
-    has_price = r.get("mkt_home") is not None and not pd.isna(r.get("mkt_home"))
-    if has_price:
-        mkt_fav = r["home"] if float(r["mkt_home"]) >= 0.5 else r["away"]
-        if "&mdash;" in v and (v.startswith("HIGH VALUE") or v.startswith("CAUTIOUS")):
-            side = v.split("&mdash;")[-1].strip().replace("small edge on ", "")
-            soft = "" if v.startswith("HIGH VALUE") else                 " The edge is small, so treat this one lightly."
-            if side != fav:
-                note = (f'For value: the model still expects <b>{fav}</b> to win, '
-                        f'but the market charges too much for {fav}. The value '
-                        f'play is <b>{side}</b>: buying the underpriced side, '
-                        f'not picking the winner.' + soft)
-            elif side == mkt_fav:
-                note = (f'For value: the model and the market agree <b>{side}</b> '
-                        f'is the likely winner, but the model is more confident '
-                        f'than the price implies. The value play is <b>{side}</b>.'
-                        + soft)
-            else:
-                note = (f'For value: the model calls an upset. It makes '
-                        f'<b>{side}</b> the favorite while the market does not, '
-                        f'so {side} comes cheap if the model is right. The value '
-                        f'play is <b>{side}</b>.' + soft)
-        elif v.startswith("NO VALUE"):
-            if fav == mkt_fav:
-                note = (f'The model and the market see this game the same way: '
-                        f'<b>{fav}</b> likely wins, and the price already says so. '
-                        f'Fair price, no bet.')
-            else:
-                note = (f'The model leans <b>{fav}</b> while the market leans '
-                        f'{mkt_fav}, but not by enough to beat the price after '
-                        f'fees. No bet.')
-        if note:
-            note = f'<div class="gap notetxt">{note}</div>'
-    if not note:
-        note = '<div class="gap notetxt" hidden></div>'
+    has_price = has_mkt
+    tier = verdict_tier(v)
+    side_v = fav
+    if "&mdash;" in v and (v.startswith("HIGH VALUE") or v.startswith("CAUTIOUS")):
+        side_v = v.split("&mdash;")[-1].strip().replace("small edge on ", "")
+    mkt_fav = (r["home"] if has_price and float(mkt_h) >= 0.5 else r["away"]) \
+        if has_price else ""
+    # Always rendered, including when there is nothing to bet: the model's
+    # outright call is worth showing on its own, and worth tracking whether or
+    # not it ever carried an edge.
+    note = ('<div class="overall">'
+            + overall_text(fav, fav_p, tier, side_v, mkt_fav, has_price)
+            + '</div>')
     spread_row = ""
     if sp_side is not None:
         side, p, line = sp_side, sp_p, sp_ln
@@ -848,8 +975,8 @@ def game_card(r):
             tag = '<span style="color:var(--yellow)">slight lean at -110</span>'
         else:
             tag = 'no edge at -110'
-        spread_row = (f'<div class="gap">Spread (Vegas: '
-                      f'{fav_line(sl, r["home"], r["away"])}): model covers '
+        # The Vegas number is now on its own line above, so it is not repeated.
+        spread_row = (f'<div class="gap">Against the spread: model covers '
                       f'<b>{side} {line}</b> {p*100:.0f}% of the time &middot; '
                       f'fair price {american(p)} &middot; {tag}</div>')
     return (f'<div class="card gcard tier-{verdict_tier(v)}" '
@@ -859,9 +986,10 @@ def game_card(r):
             f'data-sigma="{sigma:.3f}" data-p="{pm:.6f}">'
             f'<div class="match"><span class="teams">{r["away"]} @ '
             f'{r["home"]}</span><span class="date">{r["date"]}</span></div>'
-            f'<div class="call">{call}</div><div class="gline">{gline}</div>'
-            f'{picks_row}{sq3_row}'
-            f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}{spread_row}{note}'
+            f'{lines}{picks_row}'
+            f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
+            f'{note}{sq3_row}{spread_row}'
+            f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu) if len(r.get("contrib", [])) else ""}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
                stats_path="team_game_stats.csv", db_path="kalshi_prices.db",
@@ -890,6 +1018,10 @@ def build_site(out_path="site.html", games_path="games.csv",
         mu, ale, epi = ens.predict_split(Xu)
         sigma = rd.RECAL_SCALE * np.sqrt(ale + epi)
         p_home = norm.cdf(mu / sigma)
+        # Attribution for the Reasoning panel, against the same ensemble that
+        # produced mu above rather than a linear stand-in for it.
+        _train = df[df["result"].notna()][V3].values
+        contrib = rd.feature_contributions(ens, Xu, rd.neutral_row(_train))
         prices = rd.latest_prices(db_path)
         price_age = ""
         try:
@@ -914,6 +1046,7 @@ def build_site(out_path="site.html", games_path="games.csv",
                    "home": row.home_team, "mu": mu[j], "sigma": sigma[j],
                    "p_home": p_home[j], "mkt_home": None,
                    "spread_line": getattr(row, "spread_line", None),
+                   "x": Xu[j], "contrib": contrib[j],
                    "verdict": "no price"}
             ev = rd.match_event(prices, row.away_team, row.home_team)
             if ev:
