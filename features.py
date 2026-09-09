@@ -32,7 +32,21 @@ def load_team_game_stats(path):
     return {(r.game_id, r.team): r for r in stats.itertuples(index=False)}
 
 
-def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 21)):
+def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 21),
+                   epa_season_revert=1.0, form_season_revert=1.0):
+    """Leakage-safe features, chronologically.
+
+    epa_season_revert and form_season_revert are experiment knobs and default to
+    1.0, which is no change: state carries across the offseason at full strength,
+    exactly as it always has. Below 1.0 the deviation from the league mean is
+    multiplied by that factor at each season boundary, the same shape of
+    treatment kalman.py already applies to team ratings (season_revert 0.7).
+
+    They exist because that asymmetry is accidental rather than considered: the
+    ratings admit a roster turns over and the EPA features do not. Whether
+    fixing it helps is a question for walk-forward, not for taste, so the
+    default stays where the tuned numbers were measured.
+    """
     df = df.copy()
     decay = 0.5 ** (1.0 / form_half_life_games)
     pdiff = {}
@@ -44,6 +58,12 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
     away_qbfam = np.empty(len(df))
     qb_hist = {}
     epa_sides = {s: (np.empty(len(df)), np.empty(len(df))) for s in EPA_STATS}
+    # How many games this season already back each side's EPA, counted before
+    # the game in question. Zero in week 1, so a model given this can learn how
+    # much to discount numbers that are really last season's.
+    epa_games = np.empty(len(df))
+    season_games = {}
+    prev_season = None
 
     def get_state(team):
         return epa_state.setdefault(team, {s: 0.0 for s in EPA_STATS})
@@ -58,6 +78,23 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
 
     for i, row in enumerate(df.itertuples(index=False)):
         h, a = row.home_team, row.away_team
+        season = int(row.season)
+        if prev_season is not None and season != prev_season:
+            # A new season. Ratings already get this treatment in kalman.py;
+            # these knobs let the same question be asked of the EPA and form
+            # states, shrinking each team's deviation from the league mean.
+            season_games = {}
+            if epa_season_revert != 1.0 and epa_state:
+                for s in EPA_STATS:
+                    mean_s = np.mean([st[s] for st in epa_state.values()])
+                    for st in epa_state.values():
+                        st[s] = mean_s + epa_season_revert * (st[s] - mean_s)
+            if form_season_revert != 1.0 and pdiff:
+                mean_f = np.mean(list(pdiff.values()))
+                for k in pdiff:
+                    pdiff[k] = mean_f + form_season_revert * (pdiff[k] - mean_f)
+        prev_season = season
+        epa_games[i] = min(season_games.get(h, 0), season_games.get(a, 0))
         home_form[i] = pdiff.get(h, 0.0)
         away_form[i] = pdiff.get(a, 0.0)
         home_qbfam[i] = familiarity(h, row.home_qb_id)
@@ -70,6 +107,8 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
         if pd.isna(row.result):
             continue
         margin = float(row.result)
+        season_games[h] = season_games.get(h, 0) + 1
+        season_games[a] = season_games.get(a, 0) + 1
         pdiff[h] = decay * pdiff.get(h, 0.0) + (1 - decay) * margin
         pdiff[a] = decay * pdiff.get(a, 0.0) + (1 - decay) * (-margin)
         qb_hist[h].append(row.home_qb_id)
@@ -82,6 +121,8 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
                         state[s] = decay * state[s] + (1 - decay) * getattr(obs, s)
 
     df["pdiff_ewma_diff"] = home_form - away_form
+    # Not in V3_COLS: an experiment feature, opted into by name.
+    df["epa_games"] = epa_games
     df["qb_fam_diff"] = home_qbfam - away_qbfam
     # Each side kept as well as the difference. Only the difference is a model
     # input; these two exist so the site can say what the number actually means
