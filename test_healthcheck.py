@@ -165,6 +165,59 @@ H.requests.get = boom
 good, detail = H.check_feed()
 ok(good is False, "an exploding fetch should be a failure, not a crash")
 
+
+# ---------- EPA coverage ----------
+# The failure this guards: games.csv refreshes weekly while team_game_stats.csv
+# was built once, so five of the twelve model inputs freeze while the other
+# seven stay current, and nothing anywhere says so.
+def epa_files(d, games, covered):
+    gp = os.path.join(d, "games.csv")
+    sp = os.path.join(d, "stats.csv")
+    with open(gp, "w", encoding="utf-8") as f:
+        f.write("game_id,season,game_type,gameday,result\n")
+        for gid, day, res in games:
+            f.write(f"{gid},2026,REG,{day},{res}\n")
+    with open(sp, "w", encoding="utf-8") as f:
+        f.write("game_id,team,off_epa_pass\n")
+        for gid in covered:
+            f.write(f"{gid},AAA,0.1\n")
+    return gp, sp
+
+def day(offset):
+    return (datetime.now(timezone.utc) + timedelta(days=offset)).strftime("%Y-%m-%d")
+
+with tempfile.TemporaryDirectory() as d:
+    gp, sp = epa_files(d, [("2026_01_A_B", day(-1), "")], [])
+    good, detail = H.check_epa_coverage(gp, sp)
+    ok(good, f"an unplayed season should pass: {detail}")
+
+    gp, sp = epa_files(d, [("2026_01_A_B", day(-2), "7")], ["2026_01_A_B"])
+    good, detail = H.check_epa_coverage(gp, sp)
+    ok(good, f"a covered game should pass: {detail}")
+
+    # Sunday's games are legitimately missing until the Wednesday refresh.
+    gp, sp = epa_files(d, [("2026_01_A_B", day(-2), "7")], [])
+    good, detail = H.check_epa_coverage(gp, sp)
+    ok(good and "awaiting" in detail, f"a fresh gap should be tolerated: {detail}")
+
+    # Past the weekly window it means the refresh itself has stopped.
+    gp, sp = epa_files(d, [("2026_01_A_B", day(-30), "7")], [])
+    good, detail = H.check_epa_coverage(gp, sp)
+    ok(not good, "a month-old gap must fail")
+    ok("refresh has stopped" in detail, f"message should name the cause: {detail}")
+    print("epa       ->", detail[:88])
+
+    # Postseason has never carried EPA rows and must not be reported as a gap.
+    gp = os.path.join(d, "post.csv")
+    with open(gp, "w", encoding="utf-8") as f:
+        f.write("game_id,season,game_type,gameday,result\n")
+        f.write(f"2026_20_A_B,2026,WC,{day(-30)},7\n")
+        f.write(f"2026_01_A_B,2026,REG,{day(-30)},7\n")
+    with open(sp, "w", encoding="utf-8") as f:
+        f.write("game_id,team,off_epa_pass\n2026_01_A_B,AAA,0.1\n")
+    good, detail = H.check_epa_coverage(gp, sp)
+    ok(good, f"postseason absence must not be flagged: {detail}")
+
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else
               "PASS: every watchdog branch fires"))
 sys.exit(1 if fail else 0)

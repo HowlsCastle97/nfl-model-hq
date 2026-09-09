@@ -44,6 +44,9 @@ SITE_MAX_DAYS = 9
 # Once something is known broken, nagging every 30 minutes teaches you to
 # dismiss the alert unread. Re-raise twice a day instead.
 REALERT_HOURS = 12
+# The EPA refresh runs weekly, so Sunday's games are legitimately missing
+# until Wednesday. Past that window the refresh itself has stopped.
+EPA_GRACE_DAYS = 9
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -85,6 +88,57 @@ def check_price_history(db_path):
     if problems:
         return False, "; ".join(problems)
     return True, "newest snapshot per series: " + ", ".join(ages)
+
+
+def check_epa_coverage(games_path=os.path.join(HERE, "games.csv"),
+                       stats_path=os.path.join(HERE, "team_game_stats.csv")):
+    """Completed games this season that carry no EPA rows.
+
+    The failure this exists for: games.csv is refreshed weekly while
+    team_game_stats.csv was built once and never again, so five of the twelve
+    model inputs would quietly describe last season while the other seven stayed
+    current. Nothing on the page or in any log would have said so.
+
+    Recent games are allowed to be missing, because the refresh runs weekly and
+    Sunday's games are legitimately pending until Wednesday. Anything older than
+    that window means the refresh itself has stopped.
+    """
+    try:
+        import csv
+        with open(stats_path, encoding="utf-8") as f:
+            have = {row[0] for row in csv.reader(f)}
+        rows = []
+        with open(games_path, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                rows.append(row)
+    except Exception as e:
+        return None, f"cannot read the EPA inputs: {e}"
+    if not rows:
+        return False, "games.csv is empty"
+    season = max(int(r["season"]) for r in rows)
+    cutoff = (now() - timedelta(days=EPA_GRACE_DAYS)).strftime("%Y-%m-%d")
+    played, missing, stale = 0, 0, 0
+    for r in rows:
+        if int(r["season"]) != season or not r.get("result"):
+            continue
+        # Postseason has never carried EPA rows; that is pre-existing and is not
+        # what this check is looking for.
+        if r.get("game_type") and r["game_type"] != "REG":
+            continue
+        played += 1
+        if r["game_id"] not in have:
+            missing += 1
+            if r.get("gameday", "") < cutoff:
+                stale += 1
+    if played == 0:
+        return True, f"{season} has not started, nothing to cover yet"
+    if stale:
+        return False, (f"{stale} completed {season} games have had no EPA rows "
+                       f"for over {EPA_GRACE_DAYS} days: the weekly refresh has "
+                       f"stopped, so EPA features are frozen while the rest of "
+                       f"the model moves. Run prep_pbp.py --refresh-latest")
+    pending = f", {missing} awaiting the next weekly refresh" if missing else ""
+    return True, f"{played - missing} of {played} {season} games covered{pending}"
 
 
 def check_feed():
@@ -267,6 +321,7 @@ def main():
 
     checks = [
         ("price history", lambda: check_price_history(args.db)),
+        ("epa coverage", check_epa_coverage),
         ("price feed", check_feed),
         ("published site", check_site),
         ("github actions", check_actions),

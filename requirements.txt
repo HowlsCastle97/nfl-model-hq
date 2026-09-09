@@ -5,6 +5,8 @@ numpy==1.26.4
 pandas==2.2.2
 scipy==1.13.1
 requests==2.32.3
+# Reading nflverse play-by-play parquet, for the weekly EPA refresh.
+pyarrow==16.1.0
 # torch is installed separately from the CPU-only wheel index in CI; see
 # .github/workflows/weekly-site.yml. Locally any 2.x CPU build is fine.
 torch>=2.2,<3

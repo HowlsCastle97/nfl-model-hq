@@ -16,8 +16,19 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   of team's last 16 starts by today's listed starter), rest, division, indoor.
   Rows with NaN `result` are future games: features are emitted, state updates
   are skipped.
-- `prep_pbp.py`: one-time nflverse play-by-play download and per-team-game EPA
-  aggregation (cached; ~300 MB, gitignored).
+- `prep_pbp.py`: nflverse play-by-play download and per-team-game EPA
+  aggregation (parquet cache ~300 MB, gitignored). Two modes. A full build walks
+  every season and short-circuits on `team_game_stats.csv`, which is right once
+  and wrong forever after: that short-circuit is why EPA sat at 2025 week 18
+  while `games.csv` kept moving. `--refresh-latest` recomputes only the season in
+  progress and splices it in, and is what the weekly workflow runs. The splice is
+  done as **text**, not through a DataFrame: `read_csv` then `to_csv` drops a
+  digit on every untouched row (0.09235475691101869 comes back as
+  0.0923547569110186), which is both a silent data change and 7740 lines of noise
+  in a weekly commit. Idempotent: re-running with no new games leaves the file
+  byte identical. Postseason still carries no EPA rows, so team EPA coasts
+  through January on regular season values; pre-existing, and changing it is a
+  model change needing walk-forward, not a staleness fix.
 - `kalman.py`: joint Kalman filter over 32 team ratings plus home-field
   advantage. Season transition: revert 0.7 toward mean, inflate variance.
   Hyperparameters tuned by one-step predictive log-likelihood on seasons <=2023

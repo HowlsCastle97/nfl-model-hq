@@ -14,11 +14,11 @@
 # 5 minutes to the `prices` branch. This job bakes the model's probabilities into
 # the page; that one keeps the market side current between rebuilds.
 #
-# Known limitation: team_game_stats.csv (per-game EPA) is not refreshed here, so
-# EPA features go stale as the season progresses. Same limitation as the manual
-# Sunday ritual. Refreshing it needs a play-by-play download and an incremental
-# rebuild of prep_pbp.build_team_game_stats, which currently short-circuits on
-# an existing cache file.
+# team_game_stats.csv (per-game EPA) is refreshed here too, by
+# prep_pbp.py --refresh-latest, which recomputes only the season in progress.
+# Before that existed it was built once and never again, so five of the twelve
+# model inputs would have frozen at the last full rebuild while the other seven
+# stayed current, and nothing on the page would have shown it.
 
 name: Weekly site rebuild
 
@@ -99,6 +99,19 @@ jobs:
           PY
           mv games.new.csv games.csv
 
+      - name: Refresh EPA inputs for the season in progress
+        # games.csv is refreshed every week above, but team_game_stats.csv used
+        # to be built once and never again, so the EPA half of the feature set
+        # would freeze at whenever that happened while everything around it
+        # stayed current. Nothing on the page would have shown it.
+        #
+        # This recomputes only the current season and splices it in, leaving
+        # every other season byte for byte, so the diff shows the games that
+        # actually arrived. Not fatal: before week 1 nflverse has not published
+        # the file at all, and a site built on slightly old EPA is still a site.
+        continue-on-error: true
+        run: python prep_pbp.py --refresh-latest
+
       # $RUNNER_TEMP is outside the repository on purpose: the price
       # database must never end up in a commit.
       - name: Take a Kalshi price snapshot (runner-local, throwaway)
@@ -131,7 +144,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Explicit paths, so nothing else can be swept into the commit even
           # if the build leaves stray files behind.
-          git add docs/index.html games.csv
+          git add docs/index.html games.csv team_game_stats.csv
           if git diff --cached --name-only | grep -E '\.db$'; then
             echo "::error::A .db file is staged. Refusing to commit."
             exit 1
