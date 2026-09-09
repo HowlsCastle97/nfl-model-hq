@@ -33,9 +33,9 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: "Horizon in days for the This Week tab"
+        description: "Optional rolling window in days; blank shows the next NFL week"
         required: false
-        default: "8"
+        default: ""
 
 permissions:
   contents: write
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      HORIZON_DAYS: ${{ github.event.inputs.days || '8' }}
+      HORIZON_DAYS: ${{ github.event.inputs.days || '' }}
 
     steps:
       - name: Check out main
@@ -123,12 +123,15 @@ jobs:
 
       - name: Build the site
         run: |
+          # --days is passed only if one was asked for on dispatch. The default
+          # is the next unplayed NFL week, so week 2 fixtures cannot appear on
+          # the page before week 1 has kicked off.
           python website.py \
             --out docs/index.html \
             --games games.csv \
             --stats team_game_stats.csv \
             --db "$RUNNER_TEMP/kalshi_snapshot.db" \
-            --days "$HORIZON_DAYS"
+            ${HORIZON_DAYS:+--days "$HORIZON_DAYS"}
 
       - name: Guard against committing price history
         run: |

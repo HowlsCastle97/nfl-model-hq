@@ -110,12 +110,17 @@ def build_parlays(upcoming_rows, top_n=10):
     legs = []
     for r in upcoming_rows:
         mu, sigma = r["mu"], r["sigma"]
+        # Which team the leg is for is not enough to identify it. An eight day
+        # horizon can show the same team twice, and "DET ML" then means either
+        # of two games. The opponent disambiguates it in five characters.
+        opp = {r["home"]: f" v {r['away']}", r["away"]: f" at {r['home']}"}
         p_home = norm.cdf(mu / sigma)
         if r.get("mkt_home") is not None and not pd.isna(r.get("mkt_home")):
             side, p = (r["home"], p_home) if p_home >= 0.5 else (r["away"], 1 - p_home)
             price = r["mkt_home"] if side == r["home"] else 1 - r["mkt_home"]
             if 0.02 < price < 0.98:
-                legs.append({"game": f"{r['away']}@{r['home']}", "desc": f"{side} ML",
+                legs.append({"game": f"{r['away']}@{r['home']}",
+                             "team": side, "desc": f"{side} ML{opp[side]}",
                              "p": p, "dec": 1 / (price + rd.kalshi_fee(price)),
                              "wild": square3_gap(p, price) > SQUARE3_SIGMAS})
         sl = r.get("spread_line")
@@ -128,13 +133,21 @@ def build_parlays(upcoming_rows, top_n=10):
             # line implies a 50% cover and the disagreement is just probit(p).
             # This leg used to be hardcoded wild=False, which let the model's
             # most extreme spread opinions into the credible bands unflagged.
-            legs.append({"game": f"{r['away']}@{r['home']}", "desc": f"{side} {line}",
+            legs.append({"game": f"{r['away']}@{r['home']}",
+                         "team": side, "desc": f"{side} {line}{opp[side]}",
                          "p": p, "dec": SPREAD_JUICE,
                          "wild": square3_gap(p, 0.5) > SQUARE3_SIGMAS})
     parlays = []
     for k in (2, 3):
         for combo in itertools.combinations(legs, k):
+            # One leg per game, and one per team. The game guard alone would
+            # let a team that plays twice in the window appear on both sides of
+            # a parlay, and those legs are not independent: the same roster,
+            # form and injuries drive both, so multiplying their probabilities
+            # would overstate the parlay's chance of landing.
             if len({c["game"] for c in combo}) < k:
+                continue
+            if len({c["team"] for c in combo}) < k:
                 continue
             p = float(np.prod([c["p"] for c in combo]))
             dec = float(np.prod([c["dec"] for c in combo]))
@@ -1186,21 +1199,37 @@ def game_card(r):
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
                stats_path="team_game_stats.csv", db_path="kalshi_prices.db",
-               horizon_days=8, edge_threshold=0.04,
+               horizon_days=None, edge_threshold=0.04,
                prices_url=DEFAULT_PRICES_URL, mlb_feed=DEFAULT_MLB_FEED):
     df = rd.build_frame(games_path, stats_path)
     hist, by_season, calib = history_tables(df)
 
     today = pd.Timestamp.today().normalize()
     future = df[df["result"].isna() & (df["gameday"] >= today)]
-    upcoming = future[future["gameday"] <= today + pd.Timedelta(days=horizon_days)]
     week_note = ""
-    if len(upcoming) == 0 and len(future):
-        first = future["gameday"].min()
-        upcoming = future[future["gameday"] <= first + pd.Timedelta(days=6)]
-        week_note = (f'<p class="sub">No games in the next {horizon_days} days; '
-                     f'showing the next scheduled week '
-                     f'({first.date()} onward).</p>')
+    if horizon_days is None:
+        # One NFL week, not a rolling window of days. A rolling window put week 2
+        # fixtures on the page before week 1 had kicked off, which is both
+        # confusing to read and the reason a team could appear twice in the
+        # slate. Taking the earliest unplayed week rolls over on its own: once
+        # every game in a week has a result it drops out of `future`.
+        if len(future):
+            nxt = future.sort_values(["season", "week"]).iloc[0]
+            upcoming = future[(future["season"] == nxt["season"]) &
+                              (future["week"] == nxt["week"])]
+            week_note = (f'<p class="sub">Week {int(nxt["week"])} of the '
+                         f'{int(nxt["season"])} season, '
+                         f'{len(upcoming)} games.</p>')
+        else:
+            upcoming = future
+    else:
+        upcoming = future[future["gameday"] <= today + pd.Timedelta(days=horizon_days)]
+        if len(upcoming) == 0 and len(future):
+            first = future["gameday"].min()
+            upcoming = future[future["gameday"] <= first + pd.Timedelta(days=6)]
+            week_note = (f'<p class="sub">No games in the next {horizon_days} days; '
+                         f'showing the next scheduled week '
+                         f'({first.date()} onward).</p>')
     # Kickoff order, not file order. nflverse gametime is US Eastern, so it is
     # localised there and then carried to the browser as a real instant, which
     # lets each reader see the time on their own clock rather than mine.
@@ -1381,8 +1410,9 @@ def build_site(out_path="site.html", games_path="games.csv",
 
 <div id="week" class="panel on">
 <h2>This Week</h2>
-<p class="sub">Green bar: the Bayesian Model's chance the home team wins. White
-bar: what the market charges for that outcome. Badges: green means real value
+<p class="sub">Green bar: the Bayesian Model's chance the team named under the
+bars wins, which is whichever side the model favours. White bar: what the market
+charges for that same outcome, so the two are always directly comparable. Badges: green means real value
 after fees, yellow means an edge too small to trust, red means the price is fair
 or worse. Each card also grades the Vegas spread: the model's chance of covering
 each side, and whether that beats the 52.4% needed to profit at a standard -110.
@@ -1458,9 +1488,10 @@ confidence is honest.</p>
 <p class="sub">This tab is not my model. It is <a href="https://jdev-02.github.io/gooseline-model-hq/"
 style="color:var(--green)">GooseLine Solutions' MLB model</a>, loaded live from
 their public data when this page opens. I do not build, tune, or vouch for the
-baseball numbers; they are here so both sports sit in one place. Read the bars
-the same way as the NFL tab: green is the model's chance the home team wins,
-white is what the market charges. Baseball is much closer to a coin flip than
+baseball numbers; they are here so both sports sit in one place. One difference
+from the NFL tab: these bars are always the <b>home</b> team's chance, because
+this feed is read as published rather than rebuilt here. Green is that model's
+chance the home team wins, white is what the market charges. Baseball is much closer to a coin flip than
 football, so edges are smaller and rarer, and the same rule applies: a green
 badge is a starting point for a news check, not a bet.</p>
 <p class="sub" id="mlb-meta"></p>
@@ -1492,7 +1523,9 @@ if __name__ == "__main__":
     ap.add_argument("--games", default="games.csv")
     ap.add_argument("--stats", default="team_game_stats.csv")
     ap.add_argument("--db", default="kalshi_prices.db")
-    ap.add_argument("--days", type=int, default=8)
+    ap.add_argument("--days", type=int, default=None,
+                    help="show a rolling window of N days instead of the "
+                         "next unplayed NFL week (the default)")
     ap.add_argument("--mlb-feed", default=DEFAULT_MLB_FEED,
                     help="CSV feed for the read-only MLB tab; empty to disable")
     ap.add_argument("--prices-url", default=DEFAULT_PRICES_URL,
