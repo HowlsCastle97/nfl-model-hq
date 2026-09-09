@@ -869,7 +869,11 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb):
         if abs(tot) < 0.3 or len(out) >= 3:
             continue
         t, opp = who(tot)
-        pts = f"about {abs(tot):.1f} {'point' if abs(tot) < 1.5 else 'points'}"
+        # Plural decided from the string actually rendered, not a second rounding
+        # of the float: 0.95 displays as 0.9 while round(0.95, 1) is 1.0, which
+        # is how "about 0.9 point" reached the page.
+        shown = f"{abs(tot):.1f}"
+        pts = f"about {shown} {'point' if shown == '1.0' else 'points'}"
         if name == "class":
             out.append(f"<b>{t}</b> have simply been the better side this season, "
                        f"worth {pts} here before anything else about the matchup.")
@@ -911,13 +915,15 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb):
             if abs(g["rest_diff"]) > 0.1:
                 why.append("the rest edge")
             if abs(g["div_game"]) > 0.1:
-                why.append("a division game, which tend to play closer")
+                why.append("a division game")
             if abs(g["indoor"]) > 0.1:
                 why.append("the roof")
             if abs(g["kalman_var"]) > 0.1:
                 why.append("how little the model still knows about these two")
+            if len(why) > 1:
+                why = [", ".join(why[:-1]) + " and " + why[-1]]
             out.append(f"Situationally it leans <b>{t}</b> by {pts}: "
-                       f"{', '.join(why) if why else 'the spot'}.")
+                       f"{why[0] if why else 'the spot'}.")
     if not out:
         return ("<p class=\"rplain\">Nothing here moves the needle much. The model "
                 "has these two close to level and the line reflects that.</p>")

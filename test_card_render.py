@@ -93,5 +93,25 @@ print("lead margin:", re.search(r"add up to the ([\d.]+) points on (\w+)", lead)
 ok("add up to the 5.5 points on LAC" in lead,
    f"reasoning lead disagrees with the quoted line: {lead[-90:]}")
 
+# --- the plain-English summary ---
+plain = re.search(r'<p class="rplain">(.*?)</p>', h, re.S).group(1)
+print("plain summary:", re.sub(r"<[^>]+>", "", plain)[:120])
+ok("Kalman" not in plain and "EPA" not in plain and "_diff" not in plain,
+   "plain summary leaks jargon at the reader")
+ok("Add it up and the model wants" in plain, "summary does not land on the line")
+
+# Plural must follow the number actually rendered. 0.95 displays as 0.9 while
+# round(0.95, 1) is 1.0, which is how "about 0.9 point" once reached the page.
+zero = np.zeros(len(COLS))
+ki = COLS.index("kalman_diff")
+for val, want in ((1.0, "1.0 point"), (1.04, "1.0 point"), (0.95, "0.9 points"),
+                  (1.3, "1.3 points"), (2.0, "2.0 points")):
+    c = zero.copy()
+    c[ki] = val
+    txt = W.plain_summary(zero, c, "LAC", "ARI", val, "", "")
+    got = re.search(r"about [0-9.]+ points?", txt).group(0)
+    ok(got == "about " + want, f"contribution {val} reads '{got}', want 'about {want}'")
+
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else "PASS: rebuilt card"))
+
 sys.exit(1 if fail else 0)
