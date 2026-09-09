@@ -31,9 +31,9 @@ h = card()
 rows = re.findall(r'<span class="llab">(.*?)</span><span class="lval[^"]*">(.*?)</span>', h)
 print("line rows:", rows)
 ok(len(rows) == 2, f"expected 2 line rows, got {len(rows)}")
-ok(rows[0][0] == "Model predicts the line should be" and rows[0][1] == "LAC -5.5",
+ok(rows[0][0] == "Model predicts the line should be:" and rows[0][1] == "LAC -5.5",
    f"model line wrong: {rows[0]}")
-ok(rows[1][0] == "Vegas market line" and rows[1][1] == "LAC -10",
+ok(rows[1][0] == "Vegas market line:" and rows[1][1] == "LAC -10",
    f"vegas line wrong: {rows[1]}")
 ok("Bayesian Model: <b>" not in h, "old 'Bayesian Model:' headline still present")
 ok("Model says the line should be" not in h, "old duplicate line still present")

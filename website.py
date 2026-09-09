@@ -181,7 +181,7 @@ nav button{background:none;border:1px solid var(--white);color:var(--white);
   cursor:pointer;white-space:nowrap}
 nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .panel{display:none}.panel.on{display:block}
-.grid{display:grid;gap:10px}
+.grid{display:grid;gap:10px;align-items:start}
 @media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
 .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
   padding:11px 13px}
@@ -191,14 +191,16 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .date{color:var(--dim);font-size:.75rem}
 /* Model line and market line: same shape, values right aligned so the two
    numbers sit directly above one another and compare at a glance. */
-.lrow{display:grid;grid-template-columns:1fr auto;align-items:baseline;
-  gap:8px;padding:1px 0}
-.llab{color:var(--dim);font-size:.71rem;text-transform:uppercase;
-  letter-spacing:.04em}
-.lval{font-size:.98rem;font-weight:700;color:var(--green);
+/* Inline, not a two-column grid. The number belongs against the words that
+   name it; pushing it to the far edge made the reader's eye travel for it. The
+   space that frees up pays for a larger figure. */
+.lrow{padding:2px 0;line-height:1.4}
+.llab{color:var(--dim);font-size:.78rem;text-transform:uppercase;
+  letter-spacing:.03em}
+.lval{font-size:1.14rem;font-weight:700;color:var(--green);margin-left:7px;
   font-variant-numeric:tabular-nums}
 .lval.vval{color:var(--white)}
-.lnote{grid-column:1/-1;justify-self:end;color:var(--dim);font-size:.67rem}
+.lnote{color:var(--dim);font-size:.72rem;margin-left:7px}
 /* The model's outright call, always shown, value or not. */
 .overall{margin:8px 0 0;padding:7px 9px;border-radius:7px;font-size:.78rem;
   line-height:1.42;background:#3fb95018;border-left:3px solid var(--green)}
@@ -206,6 +208,8 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .reason{background:none;border:1px solid var(--line);border-radius:8px;
   padding:5px 9px;margin:9px 0 0;overflow-x:auto}
 .reason summary{font-size:.75rem;color:var(--green);font-weight:600}
+.rplain{font-size:.8rem;line-height:1.5;margin:7px 0 6px;color:var(--white)}
+.rplain b{color:var(--green)}
 .rlead{color:var(--dim);font-size:.68rem;margin:6px 0 5px;line-height:1.35}
 .rtab{width:100%;border-collapse:collapse;font-size:.7rem;margin:0}
 .rtab td{padding:3px 4px;border-bottom:1px solid #17201850;vertical-align:top}
@@ -220,7 +224,9 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .picks{margin:0 0 9px}
 .picks .plab{display:block;font-size:.68rem;font-weight:600;color:var(--dim);
   text-transform:uppercase;letter-spacing:.05em;margin-bottom:1px}
-.picks .plist{font-size:1.02rem;font-weight:700;color:var(--green);
+/* Level with .lval on purpose: the model's line and the recommended play are
+   the two numbers on the card, and neither should outrank the other. */
+.picks .plist{font-size:1.14rem;font-weight:700;color:var(--green);
   line-height:1.3}
 .picks .pnone{font-size:.85rem;font-weight:600;color:var(--dim)}
 .picks .psmall{font-size:.7rem;font-weight:600;color:var(--dim)}
@@ -832,7 +838,97 @@ def feature_value(col, v):
     return f"{v:+.2f}"
 
 
-def reasoning_panel(cols, values, contribs, home, away, mu):
+def plain_summary(vals, con, home, away, mu, hqb, aqb):
+    """The same arithmetic as the table, told the way you would tell a friend.
+
+    The per-feature rows are honest but they read like a spreadsheet. This groups
+    them the way football is actually argued about, through the air and on the
+    ground, and names the quarterback when the schedule has one.
+
+    Direction is taken from the contribution, which is the model's own answer for
+    who each input helps. The raw values are used only for colour, and only where
+    their sign is unambiguous: def_* is EPA allowed, so the team allowing more is
+    the leakier one, full stop.
+    """
+    g = dict(zip(rd.V3_COLS, con))
+    v = dict(zip(rd.V3_COLS, vals))
+    qb = {home: hqb, away: aqb}
+    themes = {
+        "class": g["kalman_diff"],
+        "air": g["off_pass_diff"] + g["def_pass_diff"] + g["cpoe_diff"],
+        "ground": g["off_rush_diff"] + g["def_rush_diff"],
+        "form": g["pdiff_ewma_diff"],
+        "qb": g["qb_fam_diff"],
+        "spot": g["rest_diff"] + g["div_game"] + g["indoor"] + g["kalman_var"],
+    }
+    def who(x):
+        return (home, away) if x > 0 else (away, home)
+
+    out = []
+    for name, tot in sorted(themes.items(), key=lambda kv: -abs(kv[1])):
+        if abs(tot) < 0.3 or len(out) >= 3:
+            continue
+        t, opp = who(tot)
+        pts = f"about {abs(tot):.1f} {'point' if abs(tot) < 1.5 else 'points'}"
+        if name == "class":
+            out.append(f"<b>{t}</b> have simply been the better side this season, "
+                       f"worth {pts} here before anything else about the matchup.")
+        elif name == "air":
+            bits = []
+            if (v["off_pass_diff"] > 0) == (t == home) and v["off_pass_diff"]:
+                who_qb = qb.get(t)
+                bits.append((f"{who_qb} and the {t} pass game have been the more "
+                             f"efficient of the two per dropback") if who_qb else
+                            "they have been the more efficient passing team")
+            if (v["def_pass_diff"] > 0) == (opp == home) and v["def_pass_diff"]:
+                bits.append(f"the {opp} pass defence has been the leakier one, "
+                            f"giving up more per throw")
+            if (v["cpoe_diff"] > 0) == (t == home) and v["cpoe_diff"]:
+                who_qb = qb.get(t)
+                bits.append((f"{who_qb} has been completing throws he had no "
+                             f"business completing") if who_qb else
+                            "they have been completing more than expected")
+            body = ", and ".join(bits) if bits else f"the passing matchup tilts {t}"
+            out.append(f"Through the air it is worth {pts} to <b>{t}</b>: {body}.")
+        elif name == "ground":
+            bits = []
+            if (v["off_rush_diff"] > 0) == (t == home) and v["off_rush_diff"]:
+                bits.append("they have been getting more out of each carry")
+            if (v["def_rush_diff"] > 0) == (opp == home) and v["def_rush_diff"]:
+                bits.append(f"the {opp} run defence has been giving it up")
+            body = ", and ".join(bits) if bits else f"the run matchup tilts {t}"
+            out.append(f"On the ground it is worth {pts} to <b>{t}</b>: {body}.")
+        elif name == "form":
+            out.append(f"<b>{t}</b> have been outscoring people lately while {opp} "
+                       f"have not, {pts} of it.")
+        elif name == "qb":
+            starter = qb.get(t)
+            out.append(f"{t} have their usual man under centre"
+                       f"{' in ' + starter if starter else ''} and {opp} do not, "
+                       f"{pts}.")
+        else:
+            why = []
+            if abs(g["rest_diff"]) > 0.1:
+                why.append("the rest edge")
+            if abs(g["div_game"]) > 0.1:
+                why.append("a division game, which tend to play closer")
+            if abs(g["indoor"]) > 0.1:
+                why.append("the roof")
+            if abs(g["kalman_var"]) > 0.1:
+                why.append("how little the model still knows about these two")
+            out.append(f"Situationally it leans <b>{t}</b> by {pts}: "
+                       f"{', '.join(why) if why else 'the spot'}.")
+    if not out:
+        return ("<p class=\"rplain\">Nothing here moves the needle much. The model "
+                "has these two close to level and the line reflects that.</p>")
+    s = half_point(mu)
+    side = home if s >= 0 else away
+    tail = (f" Add it up and the model wants <b>{side} -{abs(s):g}</b>."
+            if s else " Add it up and the model has it a pick'em.")
+    return f'<p class="rplain">{" ".join(out)}{tail}</p>'
+
+
+def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb=""):
     """Per-game breakdown of what is moving the prediction, biggest first.
 
     Sorted by size rather than listed in column order, because the point is
@@ -859,7 +955,9 @@ def reasoning_panel(cols, values, contribs, home, away, mu):
     side = home if s_line >= 0 else away
     return (
         '<details class="reason"><summary>Reasoning</summary>'
-        '<p class="rlead">What is tipping this game, biggest first. Each number '
+        + plain_summary(values, contribs, home, away, mu, hqb, aqb) +
+        '<p class="rlead">And the same thing as arithmetic, biggest first. Each '
+        'number '
         'is how much the prediction would move if that one input were neutral '
         'instead of what it is, measured on the same ensemble that produced the '
         f'prediction above. They will not add up to the {abs(s_line):g} points '
@@ -910,11 +1008,11 @@ def game_card(r):
     has_sl = sl is not None and not pd.isna(sl)
     lines = (
         f'<div class="lrow"><span class="llab">Model predicts the line '
-        f'should be</span><span class="lval">'
+        f'should be:</span><span class="lval">'
         f'{fav_line(mu, r["home"], r["away"])}</span>'
         f'<span class="lnote">&plusmn;{sigma:.0f} &middot; fair ML '
         f'{american(fav_p)}</span></div>'
-        f'<div class="lrow"><span class="llab">Vegas market line</span>'
+        f'<div class="lrow"><span class="llab">Vegas market line:</span>'
         f'<span class="lval vval">'
         f'{fav_line(sl, r["home"], r["away"]) if has_sl else "&mdash;"}</span>'
         f'</div>')
@@ -1018,7 +1116,7 @@ def game_card(r):
             f'{lines}{spread_row}{picks_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
             f'{note}{sq3_row}'
-            f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu) if len(r.get("contrib", [])) else ""}'
+            f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu, r.get("hqb", ""), r.get("aqb", "")) if len(r.get("contrib", [])) else ""}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
                stats_path="team_game_stats.csv", db_path="kalshi_prices.db",
@@ -1088,6 +1186,8 @@ def build_site(out_path="site.html", games_path="games.csv",
                    "kick_txt": (str(row.gameday.date()) if pd.isna(_k)
                                 else _k.strftime("%a %d %b, %I:%M %p ET")
                                 .replace(" 0", " ")),
+                   "hqb": getattr(row, "home_qb_name", "") or "",
+                   "aqb": getattr(row, "away_qb_name", "") or "",
                    "away": row.away_team,
                    "home": row.home_team, "mu": mu[j], "sigma": sigma[j],
                    "p_home": p_home[j], "mkt_home": None,
