@@ -106,6 +106,35 @@ def history_tables(df, seasons=(2021, 2022, 2023, 2024, 2025)):
     return hist, by_season, calib
 
 
+def select_week(future):
+    """The earliest NFL week that still has an unplayed game, and its caption.
+
+    `future` is already filtered to games with no result whose gameday has not
+    passed, which is what makes this roll over on its own. Two things fall out of
+    that and both matter:
+
+    Once every game in a week has a result the week vanishes from `future`, so
+    the Tuesday rebuild after Monday Night Football moves the page on without
+    anyone deciding it should.
+
+    And the gameday filter covers for nflverse being slow. If Sunday's results
+    have not been published yet those games still carry a null result, but their
+    date has passed, so they are already excluded and the page still advances
+    rather than showing a finished slate as though it were upcoming.
+
+    A rolling window of days did neither, which is how week 2 fixtures appeared
+    above week 1 games that had not kicked off.
+    """
+    if not len(future):
+        return future, ""
+    nxt = future.sort_values(["season", "week"]).iloc[0]
+    week = future[(future["season"] == nxt["season"]) &
+                  (future["week"] == nxt["week"])]
+    note = (f'<p class="sub">Week {int(nxt["week"])} of the '
+            f'{int(nxt["season"])} season, {len(week)} games.</p>')
+    return week, note
+
+
 def build_parlays(upcoming_rows, top_n=10):
     legs = []
     for r in upcoming_rows:
@@ -1208,20 +1237,7 @@ def build_site(out_path="site.html", games_path="games.csv",
     future = df[df["result"].isna() & (df["gameday"] >= today)]
     week_note = ""
     if horizon_days is None:
-        # One NFL week, not a rolling window of days. A rolling window put week 2
-        # fixtures on the page before week 1 had kicked off, which is both
-        # confusing to read and the reason a team could appear twice in the
-        # slate. Taking the earliest unplayed week rolls over on its own: once
-        # every game in a week has a result it drops out of `future`.
-        if len(future):
-            nxt = future.sort_values(["season", "week"]).iloc[0]
-            upcoming = future[(future["season"] == nxt["season"]) &
-                              (future["week"] == nxt["week"])]
-            week_note = (f'<p class="sub">Week {int(nxt["week"])} of the '
-                         f'{int(nxt["season"])} season, '
-                         f'{len(upcoming)} games.</p>')
-        else:
-            upcoming = future
+        upcoming, week_note = select_week(future)
     else:
         upcoming = future[future["gameday"] <= today + pd.Timedelta(days=horizon_days)]
         if len(upcoming) == 0 and len(future):

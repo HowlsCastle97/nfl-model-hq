@@ -24,11 +24,22 @@ name: Weekly site rebuild
 
 on:
   schedule:
-    # Wednesdays 12:00 UTC (07:00 ET). By Wednesday every result from the
-    # previous week is final and the coming week's games are on the board, so
-    # this is the natural point to refit. Market prices do NOT wait for this:
-    # the prices workflow refreshes them every 5 minutes. GitHub queues cron
-    # jobs on a best-effort basis, so expect this to fire a few minutes late.
+    # Twice, and the two runs do different jobs.
+    #
+    # Tuesday 12:00 UTC (08:00 ET) is the rollover. Monday Night Football ends
+    # around 03:30 UTC, so by then every game of the week has a result and the
+    # page can stop showing a slate that has already been played. Without it the
+    # site sat on the finished week from Monday night until Wednesday morning,
+    # which is a day and a half of showing completed games to anyone opening the
+    # link for the first time.
+    #
+    # Wednesday 12:00 UTC is the refit, kept because by Wednesday the coming
+    # week's lines are on the board.
+    #
+    # Market prices do NOT wait for either: the prices workflow and the local
+    # publisher refresh them every few minutes. GitHub queues cron on a
+    # best-effort basis, so expect both to fire a few minutes late.
+    - cron: "0 12 * * 2"
     - cron: "0 12 * * 3"
   workflow_dispatch:
     inputs:
