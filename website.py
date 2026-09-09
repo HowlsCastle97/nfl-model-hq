@@ -436,17 +436,30 @@ function applyCard(card, events){
   else if (best > 0){ verdict = 'CAUTIOUS &mdash; small edge on ' + side; t = 'small'; }
   else { verdict = 'NO VALUE at current price'; t = 'none'; }
 
+  /* Mirrors game_card: both bars follow the model's favourite, which is the
+     team every sentence on the card is about. Fixing them to the home side made
+     a card argue for one team while showing two numbers for the other. */
+  var focus = pm >= 0.5 ? home : away;
+  var pFocus = pm >= 0.5 ? pm : 1 - pm;
+  var mFocus = focus === home ? hAsk : aAsk;
+  var mbar = card.querySelector('.brow:not(.mktrow) .bfill.model');
+  var mval = card.querySelector('.brow:not(.mktrow) .bval');
+  if (mbar) mbar.style.width = (pFocus * 100).toFixed(1) + '%';
+  if (mval) mval.innerHTML = Math.round(pFocus * 100) + '%';
+
   var bar = card.querySelector('.mktrow .bfill.mkt');
   var val = card.querySelector('.mktrow .bval');
-  if (bar) bar.style.width = (hAsk * 100).toFixed(1) + '%';
-  if (val) val.innerHTML = Math.round(hAsk * 100) + '&cent;';
+  if (mFocus != null){
+    if (bar) bar.style.width = (mFocus * 100).toFixed(1) + '%';
+    if (val) val.innerHTML = Math.round(mFocus * 100) + '&cent;';
+  }
 
   var gap = card.querySelector('.gaptxt');
-  if (gap){
-    var g = (pm - hAsk) * 100;
-    gap.innerHTML = 'Both bars: chance the home team wins. Disagreement: <b>' +
+  if (gap && mFocus != null){
+    var g = (pFocus - mFocus) * 100;
+    gap.innerHTML = 'Both bars: chance <b>' + focus + '</b> wins. Disagreement: <b>' +
       (g >= 0 ? '+' : '') + g.toFixed(0) + '</b> points of probability ' +
-      (g > 0 ? 'toward ' : 'against ') + home;
+      (g > 0 ? 'toward ' : 'against ') + focus;
   }
   var fav = pm >= 0.5 ? home : away;
   var favP = pm >= 0.5 ? pm : 1 - pm;
@@ -1099,20 +1112,28 @@ def game_card(r):
                  + (' &middot; '.join(picks) if picks
                     else '<span class="pnone">No recommended play</span>')
                  + '</span></div>')
+    # Both bars follow the team the rest of the card is about, which is the
+    # model's favourite. They used to be fixed to the home side, so a card whose
+    # every sentence discussed the away team showed two home-team numbers and
+    # the reader had to invert them: the model reading 37% for CAR directly
+    # under a sentence saying the model likes CHI at 63%.
+    focus = fav0
+    pf = pm if focus == r["home"] else 1 - pm
     model_bar = (f'<div class="brow"><span class="blab">Bayesian model</span>'
                  f'<div class="btrack"><div class="bfill model" '
-                 f'style="width:{pm*100:.1f}%"></div></div>'
-                 f'<span class="bval">{pm*100:.0f}%</span></div>')
-    if r.get("mkt_home") is not None and not pd.isna(r.get("mkt_home")):
-        mk = float(r["mkt_home"])
-        gap = (pm - mk) * 100
+                 f'style="width:{pf*100:.1f}%"></div></div>'
+                 f'<span class="bval">{pf*100:.0f}%</span></div>')
+    mkt_focus = (r.get("mkt_home") if focus == r["home"] else r.get("mkt_away"))
+    if mkt_focus is not None and not pd.isna(mkt_focus):
+        mk = float(mkt_focus)
+        gap = (pf - mk) * 100
         mkt_bar = (f'<div class="brow mktrow"><span class="blab">Market price</span>'
                    f'<div class="btrack"><div class="bfill mkt" '
                    f'style="width:{mk*100:.1f}%"></div></div>'
                    f'<span class="bval">{mk*100:.0f}&cent;</span></div>')
-        gaptxt = (f'<div class="gap gaptxt">Both bars: chance the home team wins. '
+        gaptxt = (f'<div class="gap gaptxt">Both bars: chance <b>{focus}</b> wins. '
                   f'Disagreement: <b>{gap:+.0f}</b> points of probability '
-                  f'{"toward" if gap > 0 else "against"} {r["home"]}</div>')
+                  f'{"toward" if gap > 0 else "against"} {focus}</div>')
     else:
         mkt_bar = (f'<div class="brow mktrow"><span class="blab">Market price</span>'
                    f'<div class="btrack"><div class="bfill mkt" style="width:0%">'
@@ -1246,7 +1267,7 @@ def build_site(out_path="site.html", games_path="games.csv",
                    "aqb": getattr(row, "away_qb_name", "") or "",
                    "away": row.away_team,
                    "home": row.home_team, "mu": mu[j], "sigma": sigma[j],
-                   "p_home": p_home[j], "mkt_home": None,
+                   "p_home": p_home[j], "mkt_home": None, "mkt_away": None,
                    "spread_line": getattr(row, "spread_line", None),
                    "x": Xu[j], "contrib": contrib[j],
                    "verdict": "no price"}
@@ -1255,6 +1276,9 @@ def build_site(out_path="site.html", games_path="games.csv",
                 hp = ev.get(row.home_team)
                 if hp and hp.get("ask") is not None:
                     rec["mkt_home"] = hp["ask"]
+                    _ap = ev.get(row.away_team)
+                    if _ap and _ap.get("ask") is not None:
+                        rec["mkt_away"] = _ap["ask"]
                     e = p_home[j] - hp["ask"] - rd.kalshi_fee(hp["ask"])
                     ap = ev.get(row.away_team)
                     ea = ((1 - p_home[j]) - ap["ask"] - rd.kalshi_fee(ap["ask"])
