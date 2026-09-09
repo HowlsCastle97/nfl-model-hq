@@ -83,6 +83,11 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
 
     df["pdiff_ewma_diff"] = home_form - away_form
     df["qb_fam_diff"] = home_qbfam - away_qbfam
+    # Each side kept as well as the difference. Only the difference is a model
+    # input; these two exist so the site can say what the number actually means
+    # ("started 7 of their last 16") instead of inferring a story from the gap.
+    df["qb_fam_home"] = home_qbfam
+    df["qb_fam_away"] = away_qbfam
     df["indoor"] = df["roof"].isin(["dome", "closed"]).astype(int)
     if stats_lookup is not None:
         df["off_pass_diff"] = epa_sides["off_epa_pass"][0] - epa_sides["off_epa_pass"][1]

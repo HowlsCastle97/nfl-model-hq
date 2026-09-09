@@ -112,6 +112,41 @@ for val, want in ((1.0, "1.0 point"), (1.04, "1.0 point"), (0.95, "0.9 points"),
     got = re.search(r"about [0-9.]+ points?", txt).group(0)
     ok(got == "about " + want, f"contribution {val} reads '{got}', want 'about {want}'")
 
+
+# --- tense follows the evidence ---
+# In Week 1 every input is last season's. Describing it in the present tense is
+# a small lie that costs trust, so the copy has to say what it is working from.
+gz = np.zeros(len(COLS))
+gz[COLS.index("off_rush_diff")] = 0.7
+vz = np.zeros(len(COLS))
+vz[COLS.index("off_rush_diff")] = 0.05   # the raw value the clause describes
+wk1 = W.plain_summary(vz, gz, "CIN", "TB", -0.2, "Joe Burrow", "Baker Mayfield",
+                      played=0, fam_h=7/16, fam_a=1.0)
+mid = W.plain_summary(vz, gz, "CIN", "TB", -0.2, "Joe Burrow", "Baker Mayfield",
+                      played=8, fam_h=7/16, fam_a=1.0)
+ok("Nothing has been played yet this season" in wk1,
+   "week 1 summary does not say it is working from last season")
+ok("they got more out of each carry" in wk1,
+   f"week 1 should be past tense: {re.sub(r'<[^>]+>', '', wk1)[:150]}")
+ok("Nothing has been played yet" not in mid, "mid-season still claims nothing played")
+ok("have been getting more out of each carry" in mid, "mid-season should be present")
+
+# --- the QB clause must describe continuity, never a benching ---
+# qb_fam_diff is the share of a team's last 16 starts belonging to this week's
+# listed starter. Burrow's is 7/16 because he was injured; he is still the
+# starter. An earlier version rendered that as "CIN do not have their usual man
+# under centre", which was simply false.
+gq = np.zeros(len(COLS))
+gq[COLS.index("qb_fam_diff")] = -0.4
+qtxt = W.plain_summary(vz, gq, "CIN", "TB", -0.2, "Joe Burrow", "Baker Mayfield",
+                       played=0, fam_h=7/16, fam_a=1.0)
+flat = re.sub(r"<[^>]+>", "", qtxt)
+print("qb clause:", flat[flat.find("The model has seen"):][:130])
+ok("usual man under centre" not in flat, "summary still implies a benching")
+ok("do not" not in flat, "summary still asserts a team lacks its starter")
+ok("Joe Burrow started 7 of" in flat and "Baker Mayfield started 16 of" in flat,
+   f"QB clause should quote both start counts: {flat[:160]}")
+
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else "PASS: rebuilt card"))
 
 sys.exit(1 if fail else 0)

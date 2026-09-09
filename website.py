@@ -838,21 +838,31 @@ def feature_value(col, v):
     return f"{v:+.2f}"
 
 
-def plain_summary(vals, con, home, away, mu, hqb, aqb):
+def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
+                  fam_h=None, fam_a=None):
     """The same arithmetic as the table, told the way you would tell a friend.
 
-    The per-feature rows are honest but they read like a spreadsheet. This groups
-    them the way football is actually argued about, through the air and on the
-    ground, and names the quarterback when the schedule has one.
+    Two rules keep it honest.
 
-    Direction is taken from the contribution, which is the model's own answer for
-    who each input helps. The raw values are used only for colour, and only where
-    their sign is unambiguous: def_* is EPA allowed, so the team allowing more is
-    the leakier one, full stop.
+    Tense follows the evidence. In Week 1 every input is last season's, so the
+    prose says so and stays in the past; it moves to the present once these two
+    have played enough games this season for the EWMA to be describing now.
+    Saying "have been getting more out of each carry" about a season that has
+    not started is a small lie that costs a lot of trust.
+
+    Nothing is claimed that the feature does not measure. qb_fam_diff is the
+    share of a team's last 16 starts belonging to this week's listed starter, so
+    a low number means the model has seen little of him lately, which can simply
+    mean he was hurt. It does NOT mean a backup is playing, and an earlier
+    version of this text said exactly that about Joe Burrow, who started 7 of
+    Cincinnati's last 16 after an injury and is very much their starter.
     """
     g = dict(zip(rd.V3_COLS, con))
     v = dict(zip(rd.V3_COLS, vals))
     qb = {home: hqb, away: aqb}
+    past = played == 0
+    era = ("last season" if past
+           else "so far this season" if played < 4 else "this season")
     themes = {
         "class": g["kalman_diff"],
         "air": g["off_pass_diff"] + g["def_pass_diff"] + g["cpoe_diff"],
@@ -869,47 +879,68 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb):
         if abs(tot) < 0.3 or len(out) >= 3:
             continue
         t, opp = who(tot)
-        # Plural decided from the string actually rendered, not a second rounding
-        # of the float: 0.95 displays as 0.9 while round(0.95, 1) is 1.0, which
-        # is how "about 0.9 point" reached the page.
+        # Plural decided from the string actually rendered, not a second
+        # rounding of the float: 0.95 displays as 0.9 while round(0.95, 1) is
+        # 1.0, which is how "about 0.9 point" once reached the page.
         shown = f"{abs(tot):.1f}"
         pts = f"about {shown} {'point' if shown == '1.0' else 'points'}"
         if name == "class":
-            out.append(f"<b>{t}</b> have simply been the better side this season, "
-                       f"worth {pts} here before anything else about the matchup.")
+            were = "were" if past else "have been"
+            out.append(f"<b>{t}</b> {were} simply the better side {era}, worth "
+                       f"{pts} here before anything else about the matchup.")
         elif name == "air":
             bits = []
             if (v["off_pass_diff"] > 0) == (t == home) and v["off_pass_diff"]:
-                who_qb = qb.get(t)
-                bits.append((f"{who_qb} and the {t} pass game have been the more "
-                             f"efficient of the two per dropback") if who_qb else
-                            "they have been the more efficient passing team")
+                mover = qb.get(t)
+                verb = "were" if past else "have been"
+                bits.append((f"{mover} and the {t} pass game {verb} the more "
+                             f"efficient of the two per dropback") if mover else
+                            f"they {verb} the more efficient passing team")
             if (v["def_pass_diff"] > 0) == (opp == home) and v["def_pass_diff"]:
-                bits.append(f"the {opp} pass defence has been the leakier one, "
+                verb = "was" if past else "has been"
+                bits.append(f"the {opp} pass defence {verb} the leakier one, "
                             f"giving up more per throw")
             if (v["cpoe_diff"] > 0) == (t == home) and v["cpoe_diff"]:
-                who_qb = qb.get(t)
-                bits.append((f"{who_qb} has been completing throws he had no "
-                             f"business completing") if who_qb else
-                            "they have been completing more than expected")
+                mover = qb.get(t)
+                verb = "completed" if past else "has been completing"
+                bits.append((f"{mover} {verb} throws he had no business "
+                             f"completing") if mover else
+                            f"they {'completed' if past else 'have been completing'}"
+                            f" more than expected")
             body = ", and ".join(bits) if bits else f"the passing matchup tilts {t}"
             out.append(f"Through the air it is worth {pts} to <b>{t}</b>: {body}.")
         elif name == "ground":
             bits = []
             if (v["off_rush_diff"] > 0) == (t == home) and v["off_rush_diff"]:
-                bits.append("they have been getting more out of each carry")
+                bits.append("they got more out of each carry" if past else
+                            "they have been getting more out of each carry")
             if (v["def_rush_diff"] > 0) == (opp == home) and v["def_rush_diff"]:
-                bits.append(f"the {opp} run defence has been giving it up")
+                verb = "was" if past else "has been"
+                bits.append(f"the {opp} run defence {verb} giving it up")
             body = ", and ".join(bits) if bits else f"the run matchup tilts {t}"
             out.append(f"On the ground it is worth {pts} to <b>{t}</b>: {body}.")
         elif name == "form":
-            out.append(f"<b>{t}</b> have been outscoring people lately while {opp} "
-                       f"have not, {pts} of it.")
+            if past:
+                out.append(f"<b>{t}</b> outscored people down the stretch last "
+                           f"season while {opp} did not, {pts} of it.")
+            else:
+                out.append(f"<b>{t}</b> have been outscoring people lately while "
+                           f"{opp} have not, {pts} of it.")
         elif name == "qb":
-            starter = qb.get(t)
-            out.append(f"{t} have their usual man under centre"
-                       f"{' in ' + starter if starter else ''} and {opp} do not, "
-                       f"{pts}.")
+            # Continuity, stated as continuity. Never as a benching.
+            nt = None if fam_h is None else round(
+                (fam_h if t == home else fam_a) * 16)
+            no = None if fam_h is None else round(
+                (fam_a if t == home else fam_h) * 16)
+            tq, oq = qb.get(t), qb.get(opp)
+            if nt is not None and tq and oq:
+                out.append(f"The model has seen more of <b>{t}</b>'s quarterback, "
+                           f"{pts}: {tq} started {nt} of their last 16 games while "
+                           f"{oq} started {no} of {opp}'s, so it has a firmer read "
+                           f"on one than the other.")
+            else:
+                out.append(f"The model has seen more of <b>{t}</b>'s listed "
+                           f"starter than {opp}'s in recent games, {pts}.")
         else:
             why = []
             if abs(g["rest_diff"]) > 0.1:
@@ -925,16 +956,19 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb):
             out.append(f"Situationally it leans <b>{t}</b> by {pts}: "
                        f"{why[0] if why else 'the spot'}.")
     if not out:
-        return ("<p class=\"rplain\">Nothing here moves the needle much. The model "
-                "has these two close to level and the line reflects that.</p>")
+        return ('<p class="rplain">Nothing here moves the needle much. The model '
+                'has these two close to level and the line reflects that.</p>')
     s = half_point(mu)
     side = home if s >= 0 else away
     tail = (f" Add it up and the model wants <b>{side} -{abs(s):g}</b>."
             if s else " Add it up and the model has it a pick'em.")
-    return f'<p class="rplain">{" ".join(out)}{tail}</p>'
+    lead = ("Nothing has been played yet this season, so this is all last "
+            "year's evidence. " if past else "")
+    return f'<p class="rplain">{lead}{" ".join(out)}{tail}</p>'
 
 
-def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb=""):
+def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb="",
+                    played=0, fam_h=None, fam_a=None):
     """Per-game breakdown of what is moving the prediction, biggest first.
 
     Sorted by size rather than listed in column order, because the point is
@@ -961,7 +995,8 @@ def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb=""):
     side = home if s_line >= 0 else away
     return (
         '<details class="reason"><summary>Reasoning</summary>'
-        + plain_summary(values, contribs, home, away, mu, hqb, aqb) +
+        + plain_summary(values, contribs, home, away, mu, hqb, aqb,
+                        played, fam_h, fam_a) +
         '<p class="rlead">And the same thing as arithmetic, biggest first. Each '
         'number '
         'is how much the prediction would move if that one input were neutral '
@@ -1122,7 +1157,8 @@ def game_card(r):
             f'{lines}{spread_row}{picks_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
             f'{note}{sq3_row}'
-            f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu, r.get("hqb", ""), r.get("aqb", "")) if len(r.get("contrib", [])) else ""}'
+            f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu, r.get("hqb", ""), r.get("aqb", ""),
+            r.get("played", 0), r.get("fam_h"), r.get("fam_a")) if len(r.get("contrib", [])) else ""}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
                stats_path="team_game_stats.csv", db_path="kalshi_prices.db",
@@ -1163,6 +1199,13 @@ def build_site(out_path="site.html", games_path="games.csv",
         p_home = norm.cdf(mu / sigma)
         # Attribution for the Reasoning panel, against the same ensemble that
         # produced mu above rather than a linear stand-in for it.
+        # How much of this season these two have actually played. Week 1 is
+        # zero, and the summary has to say so rather than describing last year
+        # in the present tense.
+        cur = int(upcoming["season"].max())
+        done_now = df[(df["season"] == cur) & df["result"].notna()]
+        played_by = pd.concat([done_now["home_team"],
+                               done_now["away_team"]]).value_counts().to_dict()
         _train = df[df["result"].notna()][V3].values
         contrib = rd.feature_contributions(ens, Xu, rd.neutral_row(_train))
         prices = rd.latest_prices(db_path)
@@ -1192,6 +1235,10 @@ def build_site(out_path="site.html", games_path="games.csv",
                    "kick_txt": (str(row.gameday.date()) if pd.isna(_k)
                                 else _k.strftime("%a %d %b, %I:%M %p ET")
                                 .replace(" 0", " ")),
+                   "played": min(played_by.get(row.home_team, 0),
+                                 played_by.get(row.away_team, 0)),
+                   "fam_h": getattr(row, "qb_fam_home", None),
+                   "fam_a": getattr(row, "qb_fam_away", None),
                    "hqb": getattr(row, "home_qb_name", "") or "",
                    "aqb": getattr(row, "away_qb_name", "") or "",
                    "away": row.away_team,
