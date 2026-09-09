@@ -1,6 +1,7 @@
 import argparse
 import itertools
 from collections import Counter
+from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
@@ -235,6 +236,8 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .gap{font-size:.72rem;margin-top:5px;color:var(--dim)}
 .gap b{font-variant-numeric:tabular-nums}
 .sq3{color:var(--yellow)}
+.sprow{margin-top:3px}
+.date{white-space:nowrap}
 .verdict{display:inline-block;margin-top:7px;padding:2px 10px;border-radius:99px;
   font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
 .v-high{background:var(--green);color:#08120b}
@@ -494,9 +497,15 @@ function applyPrices(){
        so it must not claim to be live. */
     if (el && d.ts && n > 0){
       var age = (Date.now() - Date.parse(d.ts)) / 60000;
-      var when = age < 1 ? 'just now'
-               : age < 60 ? Math.round(age) + ' min ago'
-               : (age / 60).toFixed(1) + ' h ago';
+      /* A clock time, not "5 min ago". A reader checking a price wants to know
+         which moment it belongs to, and a relative figure quietly goes stale in
+         a tab left open. The date is added once it is not today. */
+      var at = new Date(Date.parse(d.ts));
+      var sameDay = at.toDateString() === new Date().toDateString();
+      var when = (sameDay ? '' : at.toLocaleDateString([], {weekday: 'short',
+                    month: 'short', day: 'numeric'}) + ', ')
+                 + at.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit',
+                    timeZoneName: 'short'});
       /* The feed is republished every 10 minutes by the logging machine, with
          a GitHub Actions job as a backstop. Anything past 20 minutes means the
          primary publisher is down, so the page stops calling itself live rather
@@ -506,17 +515,33 @@ function applyPrices(){
         ? ' <span style="color:var(--yellow)">(the price feed has stalled; ' +
           'treat these as indicative and check the market yourself)</span>'
         : '';
-      var lead = age < 20 ? 'Market prices are live: updated <b>'
-                          : 'Market prices are not current: last updated <b>';
+      var lead = age < 20 ? 'Market prices are live, updated <b>'
+                          : 'Market prices are not current, last updated <b>';
       el.innerHTML = lead + when + '</b> for ' + n +
         ' of ' + document.querySelectorAll('.gcard').length +
         ' games. Model probabilities are from the last full rebuild.' + warn;
     }
   }).catch(function(){ /* keep the prices baked in at build time */ });
 }
+/* Kickoffs are published as real instants, in UTC. Render them on the reader's
+   own clock: the build machine's timezone is nobody else's business, and "4:25
+   PM ET" is a small sum to do in your head on the way to a decision. */
+function localiseKickoffs(){
+  document.querySelectorAll('.gcard .date[data-kick]').forEach(function(el){
+    var iso = el.dataset.kick;
+    if (!iso) return;
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return;          /* keep the server's ET text */
+    el.textContent =
+      d.toLocaleDateString([], {weekday: 'short', month: 'short', day: 'numeric'}) +
+      ', ' + d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit',
+                                       timeZoneName: 'short'});
+  });
+}
+function bootWeek(){ localiseKickoffs(); applyPrices(); }
 if (document.readyState === 'loading'){
-  document.addEventListener('DOMContentLoaded', applyPrices);
-} else { applyPrices(); }
+  document.addEventListener('DOMContentLoaded', bootWeek);
+} else { bootWeek(); }
 /* Refresh while the tab sits open, and again when the reader returns to it. The
    CDN caps real freshness at 5 minutes, so polling faster would be wasted. */
 setInterval(applyPrices, 300000);
@@ -976,7 +1001,9 @@ def game_card(r):
         else:
             tag = 'no edge at -110'
         # The Vegas number is now on its own line above, so it is not repeated.
-        spread_row = (f'<div class="gap">Against the spread: model covers '
+        # Sits directly under the two lines it refers to, so it needs no
+        # preamble naming the market it is talking about.
+        spread_row = (f'<div class="gap sprow">Model covers '
                       f'<b>{side} {line}</b> {p*100:.0f}% of the time &middot; '
                       f'fair price {american(p)} &middot; {tag}</div>')
     return (f'<div class="card gcard tier-{verdict_tier(v)}" '
@@ -985,10 +1012,12 @@ def game_card(r):
             f'data-sp="{sp_pick}" data-zsp="{z_sp:.4f}" '
             f'data-sigma="{sigma:.3f}" data-p="{pm:.6f}">'
             f'<div class="match"><span class="teams">{r["away"]} @ '
-            f'{r["home"]}</span><span class="date">{r["date"]}</span></div>'
-            f'{lines}{picks_row}'
+            f'{r["home"]}</span><span class="date" '
+            f'data-kick="{r.get("kick_iso", "")}">'
+            f'{r.get("kick_txt") or r["date"]}</span></div>'
+            f'{lines}{spread_row}{picks_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
-            f'{note}{sq3_row}{spread_row}'
+            f'{note}{sq3_row}'
             f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu) if len(r.get("contrib", [])) else ""}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
@@ -1008,6 +1037,16 @@ def build_site(out_path="site.html", games_path="games.csv",
         week_note = (f'<p class="sub">No games in the next {horizon_days} days; '
                      f'showing the next scheduled week '
                      f'({first.date()} onward).</p>')
+    # Kickoff order, not file order. nflverse gametime is US Eastern, so it is
+    # localised there and then carried to the browser as a real instant, which
+    # lets each reader see the time on their own clock rather than mine.
+    upcoming = upcoming.copy()
+    times = (upcoming["gametime"].fillna("13:00")
+             if "gametime" in upcoming.columns else "13:00")
+    stamps = upcoming["gameday"].dt.strftime("%Y-%m-%d") + " " + times
+    upcoming["kick_et"] = pd.to_datetime(stamps, errors="coerce").dt.tz_localize(
+        ZoneInfo("America/New_York"), nonexistent="shift_forward", ambiguous=True)
+    upcoming = upcoming.sort_values(["kick_et", "home_team"], kind="stable")
     week_rows, parlays = [], []
     price_age = ""
     if "week_note" not in dir():
@@ -1042,7 +1081,14 @@ def build_site(out_path="site.html", games_path="games.csv",
         except Exception:
             pass
         for j, row in enumerate(upcoming.itertuples(index=False)):
-            rec = {"date": row.gameday.date(), "away": row.away_team,
+            _k = getattr(row, "kick_et", None)
+            rec = {"date": row.gameday.date(),
+                   "kick_iso": "" if pd.isna(_k) else _k.tz_convert("UTC")
+                   .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   "kick_txt": (str(row.gameday.date()) if pd.isna(_k)
+                                else _k.strftime("%a %d %b, %I:%M %p ET")
+                                .replace(" 0", " ")),
+                   "away": row.away_team,
                    "home": row.home_team, "mu": mu[j], "sigma": sigma[j],
                    "p_home": p_home[j], "mkt_home": None,
                    "spread_line": getattr(row, "spread_line", None),
@@ -1151,6 +1197,7 @@ def build_site(out_path="site.html", games_path="games.csv",
 <div class="wrap">
 <h1>NFL <span>Model</span> HQ</h1>
 <p class="sub">A Bayesian margin model &middot; generated {today.date()}</p>
+{price_age}
 
 <div id="week" class="panel on">
 <h2>This Week</h2>
@@ -1160,7 +1207,7 @@ after fees, yellow means an edge too small to trust, red means the price is fair
 or worse. Each card also grades the Vegas spread: the model's chance of covering
 each side, and whether that beats the 52.4% needed to profit at a standard -110.
 Every green light still gets a human news check first.</p>
-{week_note}{price_age}{tier_bar}<div class="grid">{cards}</div>
+{week_note}{tier_bar}<div class="grid">{cards}</div>
 </div>
 
 <div id="parlays" class="panel">
