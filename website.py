@@ -955,15 +955,18 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
                 why = [", ".join(why[:-1]) + " and " + why[-1]]
             out.append(f"Situationally it leans <b>{t}</b> by {pts}: "
                        f"{why[0] if why else 'the spot'}.")
+    lead = ("Nothing has been played yet this season, so this is all last "
+            "year's evidence. " if past else "")
     if not out:
-        return ('<p class="rplain">Nothing here moves the needle much. The model '
-                'has these two close to level and the line reflects that.</p>')
+        # Still says what it is working from. A reader in week 1 deserves the
+        # basis even when the answer is "these two look level".
+        return (f'<p class="rplain">{lead}Nothing here moves the needle much. '
+                f'The model has these two close to level and the line reflects '
+                f'that.</p>')
     s = half_point(mu)
     side = home if s >= 0 else away
     tail = (f" Add it up and the model wants <b>{side} -{abs(s):g}</b>."
             if s else " Add it up and the model has it a pick'em.")
-    lead = ("Nothing has been played yet this season, so this is all last "
-            "year's evidence. " if past else "")
     return f'<p class="rplain">{lead}{" ".join(out)}{tail}</p>'
 
 
