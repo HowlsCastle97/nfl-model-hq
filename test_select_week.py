@@ -55,6 +55,11 @@ wk, note = W.select_week(future_of(slate(played + WEEK2), "2026-09-14"))
 ok(set(wk["week"]) == {1} and len(wk) == 1,
    f"Monday should still show week 1's last game, got {len(wk)} games")
 
+# 2b. The caption must agree in number. Monday leaves a single game, and the
+#     page once said "1 games" about Monday Night Football.
+wk, note = W.select_week(future_of(slate(played + WEEK2), "2026-09-14"))
+ok("1 game." in note and "1 games" not in note, f"singular caption wrong: {note}")
+
 # 3. Tuesday, every week 1 game graded: rolls to week 2. This is what the new
 #    Tuesday rebuild exists to catch.
 allplayed = [(s, w, d, a, h, 7.0) for s, w, d, a, h, _ in WEEK1]

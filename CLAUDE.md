@@ -26,7 +26,11 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   digit on every untouched row (0.09235475691101869 comes back as
   0.0923547569110186), which is both a silent data change and 7740 lines of noise
   in a weekly commit. Idempotent: re-running with no new games leaves the file
-  byte identical. Postseason still carries no EPA rows, so team EPA coasts
+  byte identical. A full build's `last_season` defaults to the current calendar
+  year (it was a hardcoded 2025); unpublished seasons 404 and are skipped. Note
+  nflverse does revise history: a full rebuild on 2026-09-14 changed 476 rows of
+  2020 EPA by up to 0.0043, and every pinned number still reproduced to four
+  decimals, so check that rather than assume it after any full rebuild. Postseason still carries no EPA rows, so team EPA coasts
   through January on regular season values; pre-existing, and changing it is a
   model change needing walk-forward, not a staleness fix.
 - `kalman.py`: joint Kalman filter over 32 team ratings plus home-field
@@ -72,7 +76,12 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   catch, so it uses a message box, which either appears or does not.
 - `website.py`: builds the entire public site as one self-contained HTML file
   (`--out docs/index.html`). Tabs: This Week (cards), Parlay Lab (risk bands),
-  Track Record (walk-forward 2021-2025, per-game), Bayesian 101.
+  Track Record, Bayesian 101. Track Record is walk-forward from
+  `TRACK_FIRST_SEASON = 2021` through the latest season with a completed game,
+  so a new season joins on its own the week its first result lands; seasons with
+  nothing played are skipped, and only completed games are scored. A season that
+  still has unplayed games is tagged "(live)". It is the only fully honest row
+  on the tab, since every earlier season existed while the model was built.
 - `run_v2.py` / `run_deliverable2.py`: reproduction scripts for the model
   comparison tables (2024 validation, 2025 test).
 

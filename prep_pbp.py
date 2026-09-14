@@ -22,6 +22,7 @@ staleness fix.
 import argparse
 import os
 import urllib.error
+from datetime import date
 import urllib.request
 
 import pandas as pd
@@ -84,10 +85,19 @@ def season_team_game_stats(season, pbp_dir="pbp_cache", wp_filter=None,
     return off.merge(deff, on=["game_id", "team"], how="outer").fillna(0.0)
 
 
-def build_team_game_stats(first_season=2010, last_season=2025,
+def build_team_game_stats(first_season=2010, last_season=None,
                           cache_path="team_game_stats.csv", pbp_dir="pbp_cache",
                           wp_filter=None):
-    """Full rebuild from scratch. Short-circuits on the cache: see refresh()."""
+    """Full rebuild from scratch. Short-circuits on the cache: see refresh().
+
+    last_season defaults to the current calendar year, which was a hardcoded 2025
+    and silently dropped the season in progress from any full rebuild. Asking for
+    a season nflverse has not published yet is harmless: download_season treats
+    the 404 as "not published" and the loop skips it. That covers the offseason,
+    and January, when the calendar year has rolled but the season has not.
+    """
+    if last_season is None:
+        last_season = date.today().year
     if os.path.exists(cache_path):
         return pd.read_csv(cache_path)
     frames = []

@@ -62,13 +62,53 @@ def fav_line(mu, home, away):
     return f"{team} -{abs(s):g}"
 
 
-def history_tables(df, seasons=(2021, 2022, 2023, 2024, 2025)):
+# Principle 1: every season before this one shaped the model's settings, so the
+# Track Record never quotes them. Everything from here on is walk-forward.
+TRACK_FIRST_SEASON = 2021
+
+
+def history_tables(df, seasons=None):
+    """Walk-forward report card, one row per completed game.
+
+    Seasons default to TRACK_FIRST_SEASON onward, through the latest season with
+    a completed game, so a new season joins the table the week its first result
+    lands instead of waiting for someone to edit a tuple. A season with no
+    completed games yet is skipped rather than passed to walk_forward, which
+    would hand pd.concat an empty list.
+
+    The walk-forward runs on completed games only. `df` carries the unplayed
+    schedule too, because the This Week tab needs features for it, but an
+    unplayed row has no result: it cannot be scored, and in the live season it
+    would otherwise sit inside a test week. Features were built chronologically
+    over the whole frame before this, so dropping future rows here cannot leak
+    anything backwards.
+
+    by_season gains a `live` column: a season with both completed and unplayed
+    games is still in progress, and the page says so.
+    """
+    done = df[df["result"].notna()]
+    if seasons is None:
+        last = int(done["season"].max()) if len(done) else TRACK_FIRST_SEASON
+        seasons = range(TRACK_FIRST_SEASON, last + 1)
     frames = []
     for season in seasons:
-        p = walk_forward(df, V3, season, lam=rd.LIN_LAM,
+        if not (done["season"] == season).any():
+            continue
+        p = walk_forward(done, V3, season, lam=rd.LIN_LAM,
                          half_life_seasons=rd.DECAY_HL)
-        p["season"] = season
-        frames.append(p)
+        if len(p):
+            p["season"] = season
+            frames.append(p)
+    if not frames:
+        empty_hist = pd.DataFrame(columns=[
+            "game_id", "season", "week", "home_team", "away_team", "y", "mu",
+            "sigma", "spread_line", "p_home", "su_pick", "su_win", "su_correct",
+            "ats_pick", "ats_correct", "home_score", "away_score"])
+        empty_season = pd.DataFrame(
+            columns=["games", "winner_pct", "ats_pct", "avg_miss", "live"])
+        empty_calib = pd.DataFrame(
+            columns=["games", "model_said", "home_actually_won"])
+        return empty_hist, empty_season, empty_calib
     hist = pd.concat(frames, ignore_index=True)
     hist = hist.merge(df[["game_id", "spread_line"]], on="game_id", how="left")
     hist["p_home"] = norm.cdf(hist["mu"] / hist["sigma"])
@@ -94,6 +134,8 @@ def history_tables(df, seasons=(2021, 2022, 2023, 2024, 2025)):
         "ats_pct": 100 * g["ats_correct"].dropna().astype(float).mean(),
         "avg_miss": (g["y"] - g["mu"]).abs().mean(),
     }), include_groups=False).round(1)
+    unplayed = set(df.loc[df["result"].isna(), "season"].astype(int))
+    by_season["live"] = [int(s) in unplayed for s in by_season.index]
 
     edges = [0, .35, .45, .55, .65, 1.0]
     labels = ["0-35%", "35-45%", "45-55%", "55-65%", "65-100%"]
@@ -130,8 +172,11 @@ def select_week(future):
     nxt = future.sort_values(["season", "week"]).iloc[0]
     week = future[(future["season"] == nxt["season"]) &
                   (future["week"] == nxt["week"])]
+    # Monday leaves exactly one game in the week, Monday Night Football, which is
+    # how "1 games" reached the page.
+    count = f'{len(week)} game{"" if len(week) == 1 else "s"}'
     note = (f'<p class="sub">Week {int(nxt["week"])} of the '
-            f'{int(nxt["season"])} season, {len(week)} games.</p>')
+            f'{int(nxt["season"])} season, {count}.</p>')
     return week, note
 
 
@@ -1366,8 +1411,10 @@ def build_site(out_path="site.html", games_path="games.csv",
                     'No games in that tier this week.</p>')
 
 
+    live_seasons = {int(s) for s, r in by_season.iterrows() if r.live}
     srows = "".join(
-        f'<tr><td>{s}</td><td>{int(r.games)}</td><td>{r.winner_pct:.1f}%</td>'
+        f'<tr><td>{s}{" (live)" if int(s) in live_seasons else ""}</td>'
+        f'<td>{int(r.games)}</td><td>{r.winner_pct:.1f}%</td>'
         f'<td>{r.ats_pct:.1f}%</td><td>{r.avg_miss:.1f}</td></tr>'
         for s, r in by_season.iterrows())
     crows = "".join(
@@ -1401,8 +1448,9 @@ def build_site(out_path="site.html", games_path="games.csv",
             f'{ats_label(x)}</td></tr>'
             for x in g.itertuples(index=False))
         season_blocks.append(
-            f'<details><summary>{season} season &mdash; every game '
-            f'({len(g)})</summary><table><tr><th>Wk</th><th>Game</th>'
+            f'<details><summary>{season} season'
+            f'{" (live, updates weekly)" if int(season) in live_seasons else ""}'
+            f' &mdash; every game ({len(g)})</summary><table><tr><th>Wk</th><th>Game</th>'
             f'<th>Bayesian Model line</th><th>Vegas line</th>'
             f'<th>Model: home team wins</th><th>Final margin (home score first)</th>'
             f'<th>Bayesian Model winner pick</th><th>Bayesian Model spread pick</th></tr>{rows}</table></details>')
@@ -1476,7 +1524,8 @@ a positive margin means the home team won by that much, and every probability is
 the home team's chance of winning. Every prediction below was made by the Bayesian
 Model before it had seen the game: each week it trains only on games already
 played, exactly as it runs live. Seasons before 2021 are excluded because the model's settings were chosen
-using that era. Two separate report cards: Both scorecards below belong to the Bayesian
+using that era. The current season is the only fully honest test, since every
+earlier season existed while the model was being built. Two separate report cards: Both scorecards below belong to the Bayesian
 Model, never to Vegas: "winner pick" is the model picking the game outright, and
 "spread pick" is the model's chosen side against the Vegas closing line (the pick
 is spelled out in each row, for example "LAC +3"). 52.4% against the spread is

@@ -99,6 +99,28 @@ with tempfile.TemporaryDirectory() as d:
        f"columns were written out of header order: {row}")
     print("column order follows the header:", row)
 
+# 5. A full build with no last_season reaches the current year on its own.
+#    It used to stop at a hardcoded 2025, which dropped the season in progress
+#    from any full rebuild without a word. Seasons nflverse has not published
+#    come back as None and must be skipped rather than raised on.
+from datetime import date
+requested = []
+def recording(season, pbp_dir="pbp_cache", wp_filter=None, force=False):
+    requested.append(season)
+    return pd.DataFrame([{"game_id": f"{season}_01_AAA_BBB", "team": "AAA",
+                          "off_epa_pass": 0.1, "off_epa_rush": 0.1, "cpoe": 1.0,
+                          "def_epa_pass": 0.1, "def_epa_rush": 0.1}])
+prep_pbp.season_team_game_stats = recording
+with tempfile.TemporaryDirectory() as d:
+    out = prep_pbp.build_team_game_stats(first_season=date.today().year - 2,
+                                         cache_path=os.path.join(d, "s.csv"),
+                                         pbp_dir=os.path.join(d, "pbp"))
+    ok(max(requested) == date.today().year,
+       f"default last_season stopped at {max(requested)}, not {date.today().year}")
+    ok(any(out["game_id"].str.startswith(f"{date.today().year}_")),
+       "the current season's rows are missing from a default full build")
+    print(f"default full build requested seasons {requested}")
+
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else
               "PASS: the refresh splices one season and leaves the rest alone"))
 sys.exit(1 if fail else 0)
