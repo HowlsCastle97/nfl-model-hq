@@ -161,6 +161,47 @@ def refresh(season, cache_path="team_game_stats.csv", pbp_dir="pbp_cache",
     return len(fresh)
 
 
+QB_COLS = ["game_id", "season_type", "qb_dropback", "passer_id", "posteam", "qb_epa"]
+
+
+def build_qb_game_stats(first_season=2010, last_season=None,
+                        out_path="qb_game_stats.csv", pbp_dir="pbp_cache"):
+    """Per game, per quarterback: dropbacks and total QB EPA.
+
+    Keyed on passer_id, not passer_player_id. passer_player_id is empty on every
+    scramble, about 5% of dropbacks and disproportionately the mobile
+    quarterbacks, so a rating built on it would quietly undercount exactly the
+    players whose legs matter most. passer_id is filled on 100% of dropbacks.
+
+    qb_epa rather than epa: it does not charge the quarterback for a receiver's
+    fumble after the catch. The two differ on about 0.3% of dropbacks.
+
+    Regular season only, matching team_game_stats and the schedule the model
+    predicts. Always a full rebuild: the whole file is small and the rating is
+    sensitive to every game in a player's history, so a splice buys nothing.
+    """
+    if last_season is None:
+        last_season = date.today().year
+    frames = []
+    for season in range(first_season, last_season + 1):
+        fp = download_season(season, pbp_dir)
+        if fp is None:
+            continue
+        p = pd.read_parquet(fp, columns=QB_COLS)
+        p = p[(p["season_type"] == "REG") & (p["qb_dropback"] == 1)
+              & p["passer_id"].notna() & p["qb_epa"].notna()]
+        if p.empty:
+            continue
+        g = (p.groupby(["game_id", "posteam", "passer_id"])["qb_epa"]
+             .agg(dropbacks="size", qb_epa="sum").reset_index()
+             .rename(columns={"posteam": "team"}))
+        frames.append(g)
+        print(f"{season}: {len(g)} quarterback-games")
+    out = pd.concat(frames, ignore_index=True)
+    out.to_csv(out_path, index=False)
+    return out
+
+
 def latest_season(games_path="games.csv"):
     """Newest season on the schedule, which is the one worth refreshing."""
     return int(pd.read_csv(games_path, usecols=["season"])["season"].max())
@@ -172,11 +213,16 @@ def main():
                     help="recompute one season and splice it into the cache")
     ap.add_argument("--refresh-latest", action="store_true",
                     help="refresh the newest season present in games.csv")
+    ap.add_argument("--qb", action="store_true",
+                    help="rebuild qb_game_stats.csv, the per-quarterback game file")
     ap.add_argument("--games", default="games.csv")
     ap.add_argument("--cache", default="team_game_stats.csv")
     ap.add_argument("--pbp-dir", default="pbp_cache")
     args = ap.parse_args()
 
+    if args.qb:
+        build_qb_game_stats(pbp_dir=args.pbp_dir)
+        return 0
     if args.refresh_latest:
         return refresh(latest_season(args.games), args.cache, args.pbp_dir)
     if args.refresh:

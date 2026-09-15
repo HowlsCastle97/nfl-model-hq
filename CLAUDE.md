@@ -15,7 +15,19 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   differential, EPA aggregates from `team_game_stats.csv`, QB familiarity (share
   of team's last 16 starts by today's listed starter), rest, division, indoor.
   Rows with NaN `result` are future games: features are emitted, state updates
-  are skipped.
+  are skipped. Opt-in, not in `V3_COLS`: a per-quarterback rating
+  (`qb_lookup`, from `qb_game_stats.csv` via `prep_pbp.py --qb`), EPA per
+  dropback following the player across teams, keyed on `passer_id` because
+  `passer_player_id` is empty on every scramble. Shrunk toward an
+  empirical-Bayes prior of -0.076, what a quarterback actually produces over
+  his first 150 dropbacks (league average is +0.055). Tested by
+  `experiment_qb.py` on 2026-09-14 and **not shipped**: it improved the linear
+  model on selection and held-out seasons, but on the deployed ensemble the
+  held-out difference was -0.0002 [-0.0131, +0.0123]. The likeliest reading is
+  that the ensemble already extracts quarterback quality from team EPA, CPOE and
+  `qb_fam_diff` together. Kept as the foundation for injury work, where "the
+  listed starter is out, rate his backup" is exactly the case a whole-season
+  average dilutes.
 - `prep_pbp.py`: nflverse play-by-play download and per-team-game EPA
   aggregation (parquet cache ~300 MB, gitignored). Two modes. A full build walks
   every season and short-circuits on `team_game_stats.csv`, which is right once
@@ -191,7 +203,21 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
 4. This Week tab: edge filter buttons (like the Parlay Lab band buttons) to
    filter game cards by verdict tier: High value / Small edge / No value /
    No price.
-5. Backlog: parse Kalshi spread-market strikes from logged subtitle/floor_strike
+5. Injury impact. Measured 2026-09-14 against the deployed ensemble's own
+   2021-2025 walk-forward misses: each non-QB regular starter listed Out or
+   Doubtful on the final report moves the team -0.50 points against the model's
+   prediction (95% CI -1.04 to +0.03), monotone across 0, 1, 2 and 3+ starters
+   out. A crude unweighted count, so suggestive rather than proven, and the
+   first real unmodelled signal found. Data is free and backtestable: nflverse
+   `injuries_{season}.parquet` (official reports from 2012, keyed by `gsis_id`)
+   and `snap_counts_{season}.parquet`. Starter status must come from games
+   strictly before the report week, because an injured player has no snap row
+   in the week he misses. Two constraints: the final report lands Friday and
+   inactives 90 minutes before kickoff, so a Tuesday or Wednesday rebuild cannot
+   see them; and beat reporter or insider scraping is not a model input, since
+   it has no archive aligned to prediction time and cannot be walk-forward
+   tested. PFF grades are a paid licence and must not be scraped.
+6. Backlog: parse Kalshi spread-market strikes from logged subtitle/floor_strike
    once real KXNFLSPREAD rows accumulate and compute spread edges against real
    prices (currently graded against Vegas line at -110); totals model (target =
    total points, same pipeline; enables over/unders); backtest engine over
