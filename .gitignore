@@ -8,3 +8,8 @@ old_schema.db
 
 # Logger output; the price history itself is kalshi_prices.db above.
 logs/
+
+# Regenerated in about 20 seconds by prep_injuries.py from nflverse; the injury
+# feature did not ship, so nothing in production reads it.
+injury_player_weeks.csv
+nflverse_cache/

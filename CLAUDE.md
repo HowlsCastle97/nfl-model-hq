@@ -217,6 +217,20 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
    see them; and beat reporter or insider scraping is not a model input, since
    it has no archive aligned to prediction time and cannot be walk-forward
    tested. PFF grades are a paid licence and must not be scraped.
+   First attempt, `experiment_injury.py` on 2026-09-14, **did not ship**.
+   `prep_injuries.py` builds the rows (report designation, snap importance over
+   the last eight games strictly before the report week, whether he played;
+   crosswalk `gsis_id` to `pfr_id` via nflverse `players.parquet`, 100%). Absence
+   by designation, 2012-2023: Out 1.00, Doubtful 0.99, Questionable 0.44. Six
+   position-group weights fitted by OLS on the ensemble's 2021-2023 residuals
+   were noise: every interval straddled zero and OL and LB came out with the
+   wrong sign. Held out 2024-2025 on the deployed ensemble: +0.0038
+   [-0.0074, +0.0151], RMSE 13.02 to 13.10, slightly worse. The design fault was
+   six free parameters on 815 games; the remedy is shrinkage (one pooled weight,
+   or group weights shrunk toward a common one). But 2024-2025 is now spent on
+   this question, and the motivating count used 2021-2025, so any revised design
+   must be pre-registered and confirmed prospectively on 2026, not re-tested on
+   the same held-out seasons.
 6. Backlog: parse Kalshi spread-market strikes from logged subtitle/floor_strike
    once real KXNFLSPREAD rows accumulate and compute spread edges against real
    prices (currently graded against Vegas line at -110); totals model (target =
