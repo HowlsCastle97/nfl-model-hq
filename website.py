@@ -293,14 +293,15 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .lrow{padding:2px 0;line-height:1.4}
 .llab{color:var(--dim);font-size:.78rem;text-transform:uppercase;
   letter-spacing:.03em}
-.lval{font-size:1.14rem;font-weight:700;color:var(--green);margin-left:7px;
+.lval{font-size:1.14rem;font-weight:700;color:var(--green);margin-left:3px;
   font-variant-numeric:tabular-nums}
 .lval.vval{color:var(--white)}
-.lnote{color:var(--dim);font-size:.72rem;margin-left:7px}
+.lnote{color:var(--dim);font-size:.72rem;margin-left:3px}
 /* The model's outright call, always shown, value or not. */
-.overall{margin:8px 0 0;padding:7px 9px;border-radius:7px;font-size:.78rem;
-  line-height:1.42;background:#3fb95018;border-left:3px solid var(--green)}
-.overall b{color:var(--green)}
+/* The outright call's probability sits beside the team, readable at a glance
+   but a step below it, so the pick itself stays the loudest thing in the row. */
+.lpct{color:var(--white);font-size:.92rem;font-weight:600;margin-left:3px}
+.lpct b{color:var(--green)}
 .reason{background:none;border:1px solid var(--line);border-radius:8px;
   padding:5px 9px;margin:9px 0 0;overflow-x:auto}
 .reason summary{font-size:.75rem;color:var(--green);font-weight:600}
@@ -317,15 +318,10 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .rval{display:block;color:var(--dim);font-weight:400;
   font-variant-numeric:tabular-nums}
 .rdesc{color:var(--dim);line-height:1.3}
-.picks{margin:0 0 9px}
-.picks .plab{display:block;font-size:.68rem;font-weight:600;color:var(--dim);
-  text-transform:uppercase;letter-spacing:.05em;margin-bottom:1px}
-/* Level with .lval on purpose: the model's line and the recommended play are
-   the two numbers on the card, and neither should outrank the other. */
-.picks .plist{font-size:1.14rem;font-weight:700;color:var(--green);
-  line-height:1.3}
-.picks .pnone{font-size:.85rem;font-weight:600;color:var(--dim)}
-.picks .psmall{font-size:.7rem;font-weight:600;color:var(--dim)}
+/* The value recommendation is one of the four bold rows, so it takes .lval's
+   size and weight; only the "nothing to bet" and "(small edge)" notes step down. */
+.pnone{font-size:.85rem;font-weight:600;color:var(--dim)}
+.psmall{font-size:.7rem;font-weight:600;color:var(--dim)}
 .bars{display:grid;gap:4px;margin:4px 0 2px}
 .brow{display:grid;grid-template-columns:96px 1fr 44px;align-items:center;
   gap:8px;font-size:.7rem}
@@ -461,34 +457,6 @@ function tierOfVerdict(v){
 }
 /* Same three cases as game_card's Python prose, kept in step deliberately: if
    these ever diverge the page would explain a verdict it is not showing. */
-/* Mirrors overall_text() in website.py case for case. It leads with the
-   model's outright call every time, including when nothing is worth betting,
-   because that call is the thing a reader most often wants and it is worth
-   tracking whether or not it ever carried an edge. */
-function overallText(fav, favP, t, side, mktFav){
-  var call = 'Model makes <b>' + fav + '</b> the winner <b>' +
-             Math.round(favP * 100) + '%</b> of the time';
-  if (t === 'none'){
-    return fav === mktFav
-      ? (call + ', and the market prices it about the same. Fair price, ' +
-         'nothing to bet.')
-      : (call + ', against a market that leans ' + mktFav + ', but not by ' +
-         'enough to beat the price after fees. Nothing to bet.');
-  }
-  var soft = t === 'high' ? '' : ' The edge is small, so treat it lightly.';
-  if (side !== fav){
-    return (call + ', but the market charges too much for ' + fav + ' to be ' +
-            'worth backing. The value is in <b>' + side + '</b> instead: buying ' +
-            'the underpriced side, not picking the winner.' + soft);
-  }
-  if (side === mktFav){
-    return (call + ', and the market agrees on the winner but is not as ' +
-            'confident, so <b>' + side + '</b> is underpriced.' + soft);
-  }
-  return (call + ', which the market does not: it makes ' + mktFav +
-          ' the favourite, so <b>' + side + '</b> comes cheap if the model is ' +
-          'right.' + soft);
-}
 function recountTiers(){
   var counts = {high: 0, small: 0, none: 0, nopr: 0}, total = 0;
   document.querySelectorAll('.gcard').forEach(function(c){
@@ -557,11 +525,6 @@ function applyCard(card, events){
       (g >= 0 ? '+' : '') + g.toFixed(0) + '</b> points of probability ' +
       (g > 0 ? 'toward ' : 'against ') + focus;
   }
-  var fav = pm >= 0.5 ? home : away;
-  var favP = pm >= 0.5 ? pm : 1 - pm;
-  var mktFav = hAsk >= 0.5 ? home : away;
-  var note = card.querySelector('.overall');
-  if (note){ note.innerHTML = overallText(fav, favP, t, side, mktFav); }
   var badge = card.querySelector('.verdict');
   if (badge){ badge.className = 'verdict ' + TIER_CLS[t]; badge.innerHTML = verdict; }
   /* The picks row is the loudest thing on the card, so it has to move with the
@@ -574,7 +537,7 @@ function applyCard(card, events){
       ' ML <span class="psmall">(small edge)</span>');
     if (card.dataset.sp) picks.push(card.dataset.sp);
     plist.innerHTML = picks.length ? picks.join(' &middot; ')
-      : '<span class="pnone">No recommended play</span>';
+      : '<span class="pnone">None at current prices</span>';
   }
   /* The moneyline gap moves with the price, so the caution has to move with it
      too. The spread gap is model versus the Vegas line and rides in data-zsp. */
@@ -1119,36 +1082,6 @@ def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb="",
         f'<table class="rtab">{"".join(body)}</table></details>')
 
 
-def overall_text(fav, fav_p, tier, side, mkt_fav, has_price):
-    """One sentence: who the model likes outright, then whether that is buyable.
-
-    Always present, including when there is nothing to bet. A reader who wants
-    the model's outright opinion should not have to infer it from the absence of
-    a recommendation, and that opinion is worth tracking whether or not it ever
-    carried an edge.
-    """
-    call = f'Model makes <b>{fav}</b> the winner <b>{fav_p*100:.0f}%</b> of the time'
-    if not has_price:
-        return f'{call}. No market price yet, so there is nothing to compare it to.'
-    if tier == "none":
-        if fav == mkt_fav:
-            return (f'{call}, and the market prices it about the same. '
-                    f'Fair price, nothing to bet.')
-        return (f'{call}, against a market that leans {mkt_fav}, but not by '
-                f'enough to beat the price after fees. Nothing to bet.')
-    soft = "" if tier == "high" else " The edge is small, so treat it lightly."
-    if side != fav:
-        return (f'{call}, but the market charges too much for {fav} to be worth '
-                f'backing. The value is in <b>{side}</b> instead: buying the '
-                f'underpriced side, not picking the winner.' + soft)
-    if side == mkt_fav:
-        return (f'{call}, and the market agrees on the winner but is not as '
-                f'confident, so <b>{side}</b> is underpriced.' + soft)
-    return (f'{call}, which the market does not: it makes {mkt_fav} the '
-            f'favourite, so <b>{side}</b> comes cheap if the model is right.'
-            + soft)
-
-
 def game_card(r):
     mu, sigma, pm = r["mu"], r["sigma"], r["p_home"]
     fav0 = r["home"] if pm >= 0.5 else r["away"]
@@ -1160,12 +1093,11 @@ def game_card(r):
     sl = r.get("spread_line")
     has_sl = sl is not None and not pd.isna(sl)
     lines = (
-        f'<div class="lrow"><span class="llab">Model predicts the line '
-        f'should be:</span><span class="lval">'
-        f'{fav_line(mu, r["home"], r["away"])}</span>'
+        f'<div class="lrow"><span class="llab">Bayesian prediction:</span> '
+        f'<span class="lval">{fav_line(mu, r["home"], r["away"])}</span> '
         f'<span class="lnote">&plusmn;{sigma:.0f} &middot; fair ML '
         f'{american(fav_p)}</span></div>'
-        f'<div class="lrow"><span class="llab">Vegas market line:</span>'
+        f'<div class="lrow"><span class="llab">Vegas market:</span> '
         f'<span class="lval vval">'
         f'{fav_line(sl, r["home"], r["away"]) if has_sl else "&mdash;"}</span>'
         f'</div>')
@@ -1203,11 +1135,28 @@ def game_card(r):
     sq3_row = (f'<div class="gap sq3"{"" if z_max > SQUARE3_SIGMAS else " hidden"}>'
                f'{square3_text(z_max, sigma)}</div>')
     picks = [x for x in (ml_pick, sp_pick) if x]
-    picks_row = ('<div class="picks"><span class="plab">Recommended picks</span>'
-                 '<span class="plist">'
-                 + (' &middot; '.join(picks) if picks
-                    else '<span class="pnone">No recommended play</span>')
-                 + '</span></div>')
+    # The model's outright call and the value call are different questions, and
+    # the card used to answer the first only inside a sentence about the second:
+    # "the model still makes LAC the winner, but the market charges too much".
+    # Each now has its own row in the same bold block as the lines, so a reader
+    # sees who the model thinks wins even on a game with nothing to bet, and
+    # sees separately what, if anything, is worth buying.
+    if abs(fav_p - 0.5) < 0.005:
+        ml_row = ('<div class="lrow"><span class="llab">ML pick:</span> '
+                  '<span class="lval">too close to call</span></div>')
+    else:
+        ml_row = (f'<div class="lrow"><span class="llab">ML pick:</span> '
+                  f'<span class="lval">{fav0}</span> '
+                  f'<span class="lpct">predicted to win <b>{fav_p*100:.0f}%</b> '
+                  f'of the time</span></div>')
+    if picks:
+        value_html = ' &middot; '.join(picks)
+    elif has_mkt:
+        value_html = '<span class="pnone">None at current prices</span>'
+    else:
+        value_html = '<span class="pnone">No market price yet</span>'
+    value_row = ('<div class="lrow"><span class="llab">Value recommendation:</span> '
+                 f'<span class="lval plist">{value_html}</span></div>')
     # Both bars follow the team the rest of the card is about, which is the
     # model's favourite. They used to be fixed to the home side, so a card whose
     # every sentence discussed the away team showed two home-team numbers and
@@ -1236,20 +1185,6 @@ def game_card(r):
                    f'</div></div><span class="bval">&mdash;</span></div>')
         gaptxt = '<div class="gap gaptxt">Market has not opened this game yet</div>'
     v = str(r["verdict"])
-    fav = r["home"] if pm >= 0.5 else r["away"]
-    has_price = has_mkt
-    tier = verdict_tier(v)
-    side_v = fav
-    if "&mdash;" in v and (v.startswith("HIGH VALUE") or v.startswith("CAUTIOUS")):
-        side_v = v.split("&mdash;")[-1].strip().replace("small edge on ", "")
-    mkt_fav = (r["home"] if has_price and float(mkt_h) >= 0.5 else r["away"]) \
-        if has_price else ""
-    # Always rendered, including when there is nothing to bet: the model's
-    # outright call is worth showing on its own, and worth tracking whether or
-    # not it ever carried an edge.
-    note = ('<div class="overall">'
-            + overall_text(fav, fav_p, tier, side_v, mkt_fav, has_price)
-            + '</div>')
     spread_row = ""
     if sp_side is not None:
         side, p, line = sp_side, sp_p, sp_ln
@@ -1274,9 +1209,9 @@ def game_card(r):
             f'{r["home"]}</span><span class="date" '
             f'data-kick="{r.get("kick_iso", "")}">'
             f'{r.get("kick_txt") or r["date"]}</span></div>'
-            f'{lines}{spread_row}{picks_row}'
+            f'{lines}{ml_row}{value_row}{spread_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
-            f'{note}{sq3_row}'
+            f'{sq3_row}'
             f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu, r.get("hqb", ""), r.get("aqb", ""),
             r.get("played", 0), r.get("fam_h"), r.get("fam_a")) if len(r.get("contrib", [])) else ""}'
             f'{verdict_badge(v)}</div>')

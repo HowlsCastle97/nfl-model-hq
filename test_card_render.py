@@ -27,46 +27,52 @@ def sect(h, cls):
 
 h = card()
 
-# --- the two line rows, and the old duplicated prose gone ---
-rows = re.findall(r'<span class="llab">(.*?)</span><span class="lval[^"]*">(.*?)</span>', h)
-print("line rows:", rows)
-ok(len(rows) == 2, f"expected 2 line rows, got {len(rows)}")
-ok(rows[0][0] == "Model predicts the line should be:" and rows[0][1] == "LAC -5.5",
-   f"model line wrong: {rows[0]}")
-ok(rows[1][0] == "Vegas market line:" and rows[1][1] == "LAC -10",
-   f"vegas line wrong: {rows[1]}")
-ok("Bayesian Model: <b>" not in h, "old 'Bayesian Model:' headline still present")
-ok("Model says the line should be" not in h, "old duplicate line still present")
-ok("Gambler terms" not in h, "ancient label still present")
-ok("Spread (Vegas:" not in h, "spread row still repeats the Vegas number")
+# --- the four bold rows, in the order a reader asked for them ---
+def block(x):
+    """label -> plain text of the value, for each bold row."""
+    out = {}
+    for lab, rest in re.findall(r'<div class="lrow"><span class="llab">(.*?)</span>(.*?)</div>', x, re.S):
+        out[lab] = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", rest)).strip()
+    return out
+
+b = block(h)
+print("bold rows:", b)
+ok(list(b) == ["Bayesian prediction:", "Vegas market:", "ML pick:", "Value recommendation:"],
+   f"rows missing or out of order: {list(b)}")
+ok(b["Bayesian prediction:"].startswith("LAC -5.5"), f"model line wrong: {b}")
+ok(b["Vegas market:"] == "LAC -10", f"vegas line wrong: {b}")
 ok("&plusmn;16" in h, "sigma dropped from the card")
+for gone in ("Bayesian Model: <b>", "Model says the line should be", "Gambler terms",
+             "Spread (Vegas:", "Model predicts the line should be", 'class="overall"',
+             "Recommended picks"):
+    ok(gone not in h, f"old copy still present: {gone}")
 
-# --- the outright call is always there ---
-def overall(x):
-    m = re.search(r'<div class="overall">(.*?)</div>', x, re.S)
-    return re.sub(r"<[^>]+>", "", m.group(1)) if m else None
+# --- the ML pick is the outright call, independent of any value verdict ---
+# It used to live only inside a sentence about value ("the model still makes LAC
+# the winner, but..."), so on a card with value on the other side a reader had
+# to dig for who the model actually thinks wins.
+ok(b["ML pick:"] == "LAC predicted to win 64% of the time", f"ML pick wrong: {b['ML pick:']}")
+ok(b["Value recommendation:"] == "ARI ML · ARI +10".replace("·", "&middot;")
+   or b["Value recommendation:"].replace("&middot;", "·") == "ARI ML · ARI +10",
+   f"value row wrong: {b['Value recommendation:']}")
 
-print("value/other side :", overall(h))
-ok("Model makes LAC the winner 64% of the time" in overall(h), "outright call wrong")
-ok("value is in ARI" in overall(h), "value side not named")
+bn = block(card(verdict="NO VALUE at current price", spread_line=5.0))
+ok(bn["ML pick:"] == "LAC predicted to win 64% of the time",
+   "the ML pick must survive a no-value verdict")
+ok(bn["Value recommendation:"] == "None at current prices", f"no-value row wrong: {bn}")
 
-hn = card(verdict="NO VALUE at current price")
-print("no value         :", overall(hn))
-ok("Model makes LAC the winner 64%" in overall(hn),
-   "outright call must survive a no-value verdict")
-ok("othing to bet" in overall(hn), "no-value wording missing")
+bp = block(card(verdict="no price", mkt_home=None, spread_line=5.0))
+ok(bp["Value recommendation:"] == "No market price yet", f"no-price row wrong: {bp}")
 
-hp = card(verdict="no price", mkt_home=None)
-print("no price         :", overall(hp))
-ok("No market price yet" in overall(hp), "no-price wording missing")
+bc = block(card(verdict="CAUTIOUS &mdash; small edge on ARI"))
+ok("(small edge)" in bc["Value recommendation:"], "cautious value lost its qualifier")
 
-hs = card(verdict="HIGH VALUE &mdash; LAC", mkt_home=0.40)
-print("model+market same:", overall(hs))
-ok("comes cheap" in overall(hs) or "underpriced" in overall(hs),
-   "agree/upset wording missing")
+# Away favourite: the pick names the away team and quotes its own probability.
+ba = block(card(mu=-4.5, p_home=0.37, spread_line=-3.0, verdict="NO VALUE at current price"))
+ok(ba["ML pick:"] == "ARI predicted to win 63% of the time", f"away favourite wrong: {ba}")
 
-hc = card(verdict="CAUTIOUS &mdash; small edge on ARI")
-ok("treat it lightly" in overall(hc), "cautious softener missing")
+bt = block(card(mu=0.1, p_home=0.502, verdict="NO VALUE at current price"))
+ok(bt["ML pick:"] == "too close to call", f"coin flip should not name a side: {bt}")
 
 # --- Reasoning ---
 ok("<summary>Reasoning</summary>" in h, "no Reasoning dropdown")
