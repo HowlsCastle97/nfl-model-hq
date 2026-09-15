@@ -15,6 +15,12 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rundown as rd
 import website as W
+from models import LinearGaussianModel
+
+# The season logic under test does not depend on which model is graded, and the
+# deployed ensemble would make this suite take minutes. Swap in the linear model
+# here; the default factory itself is checked separately at the bottom.
+FAST = lambda: LinearGaussianModel(lam=rd.LIN_LAM)
 
 fail = []
 def ok(c, m):
@@ -51,7 +57,7 @@ frame = pd.DataFrame(
     + season(2027, 17, 0))                        # scheduled, nothing played
 frame["y"] = frame["result"].astype(float)
 
-hist, by_season, calib = W.history_tables(frame)
+hist, by_season, calib = W.history_tables(frame, model_factory=FAST)
 print(by_season[["games", "winner_pct", "live"]].to_string())
 
 # Auto-inclusion: nothing hardcoded, so a season after 2025 joins on its own.
@@ -79,15 +85,45 @@ unplayed = frame.copy()
 unplayed["result"] = np.nan
 unplayed["y"] = np.nan
 try:
-    h0, s0, c0 = W.history_tables(unplayed)
+    h0, s0, c0 = W.history_tables(unplayed, model_factory=FAST)
     ok(len(h0) == 0 and len(s0) == 0, "an all-unplayed frame should give empty tables")
     print("\nall-unplayed frame: empty tables, no exception")
 except Exception as e:
     fail.append(f"an all-unplayed frame raised {type(e).__name__}: {e}")
 
 # Explicit seasons still work, and a requested season with no results is skipped.
-h1, s1, _ = W.history_tables(frame, seasons=[2025, 2027])
+h1, s1, _ = W.history_tables(frame, seasons=[2025, 2027], model_factory=FAST)
 ok(list(s1.index) == [2025], f"explicit seasons mishandled: {list(s1.index)}")
+
+# The default must be the deployed model, not the linear one it used to grade.
+# Checked without fitting anything, by intercepting the factory walk_forward is
+# handed and substituting the fast model for the actual fit.
+seen = []
+real_wf = W.walk_forward
+def spy(df, cols, season, **kw):
+    seen.append(kw.get("model_factory"))
+    return real_wf(df, cols, season, half_life_seasons=kw.get("half_life_seasons"),
+                   model_factory=FAST)
+W.walk_forward = spy
+try:
+    W.history_tables(frame, seasons=[2025])
+finally:
+    W.walk_forward = real_wf
+ok(bool(seen) and seen[0] is rd.DeployedModel,
+   f"history_tables grades {seen[0] if seen else None}, not rd.DeployedModel")
+
+# And the deployed model must publish exactly what the page used to compute by
+# hand: RECAL_SCALE times the root of aleatoric plus epistemic variance.
+Xs = frame[frame["result"].notna()][rd.V3_COLS].values[:200]
+ys = frame[frame["result"].notna()]["y"].values[:200]
+dm = rd.DeployedModel().fit(Xs, ys)
+mu_d, sig_d = dm.predict_dist(Xs[:20])
+mu_s, ale, epi = dm.predict_split(Xs[:20])
+ok(np.allclose(mu_d, mu_s), "predict_dist and predict_split disagree on mu")
+ok(np.allclose(sig_d, rd.RECAL_SCALE * np.sqrt(ale + epi)),
+   "published sigma is not RECAL_SCALE * sqrt(aleatoric + epistemic)")
+ok(dm.ens.hidden == 16 and dm.ens.epochs == 200 and dm.ens.weight_decay == 1e-2,
+   "DeployedModel is not using the tuned ensemble hyperparameters")
 
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else
               "PASS: seasons join on their own, empty seasons are skipped, live is live"))

@@ -46,7 +46,12 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
 - `walkforward.py`: weekly-refit walk-forward harness; `model_factory` hook lets
   any fit/predict_dist model drop in. Season decay weights (half-life 2.0).
 - `rundown.py`: deployment constants (RECAL_SCALE=1.039 variance recalibration,
-  LIN_LAM=100), fits deployment models on all completed games, joins latest
+  LIN_LAM=100). `DeployedModel` is the single definition of the distribution
+  the site publishes: the tuned ensemble plus RECAL_SCALE, via `predict_dist`.
+  Use it for anything that needs published mu and sigma. Do not construct
+  `DeepEnsemble()` directly for that: its defaults are not the tuned ones
+  (hidden 32, 300 epochs) and its own `predict_dist` omits RECAL_SCALE, so it is
+  3.9% more confident than the page. Fits deployment models on all completed games, joins latest
   Kalshi prices from sqlite, computes fee-adjusted edges
   (fee = 0.07*p*(1-p)), Kalshi team aliases (LA<->LAR, etc.).
 - `kalshi_logger.py`: polls Kalshi public API
@@ -82,6 +87,10 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   nothing played are skipped, and only completed games are scored. A season that
   still has unplayed games is tagged "(live)". It is the only fully honest row
   on the tab, since every earlier season existed while the model was built.
+  The tab grades `rd.DeployedModel`, the same ensemble that makes the This Week
+  picks. It used to grade the ridge linear model, a different model from the one
+  readers act on. So its numbers are NOT the pinned linear reproduction numbers
+  below and should not be expected to match them.
 - `run_v2.py` / `run_deliverable2.py`: reproduction scripts for the model
   comparison tables (2024 validation, 2025 test).
 
@@ -193,4 +202,6 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
 Validate end-to-end before delivering: synthetic data matching real schemas for
 unit tests (see the mocked Kalshi pages pattern), and reproduce the paper
 numbers (2025 walk-forward: linear+kalman+qb NLL ~3.980, RMSE ~12.94) when
-touching the model path.
+touching the model path. Those are the linear model's numbers, reproduced with
+`walk_forward(..., lam=rd.LIN_LAM)` and no model factory; the Track Record tab
+grades the deployed ensemble and shows different figures by design.

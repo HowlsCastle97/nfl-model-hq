@@ -67,8 +67,15 @@ def fav_line(mu, home, away):
 TRACK_FIRST_SEASON = 2021
 
 
-def history_tables(df, seasons=None):
+def history_tables(df, seasons=None, model_factory=None):
     """Walk-forward report card, one row per completed game.
+
+    Graded by rd.DeployedModel unless told otherwise: the same deep ensemble,
+    hyperparameters and variance recalibration that make the This Week picks.
+    It used to grade the ridge linear model, which was honest walk-forward but
+    of a different model from the one a reader was acting on, so every sigma on
+    the tab was one constant and the "(live)" row tested the wrong thing. The
+    factory is a parameter only so tests can swap in something fast.
 
     Seasons default to TRACK_FIRST_SEASON onward, through the latest season with
     a completed game, so a new season joins the table the week its first result
@@ -87,6 +94,8 @@ def history_tables(df, seasons=None):
     games is still in progress, and the page says so.
     """
     done = df[df["result"].notna()]
+    if model_factory is None:
+        model_factory = rd.DeployedModel
     if seasons is None:
         last = int(done["season"].max()) if len(done) else TRACK_FIRST_SEASON
         seasons = range(TRACK_FIRST_SEASON, last + 1)
@@ -94,8 +103,8 @@ def history_tables(df, seasons=None):
     for season in seasons:
         if not (done["season"] == season).any():
             continue
-        p = walk_forward(done, V3, season, lam=rd.LIN_LAM,
-                         half_life_seasons=rd.DECAY_HL)
+        p = walk_forward(done, V3, season, half_life_seasons=rd.DECAY_HL,
+                         model_factory=model_factory)
         if len(p):
             p["season"] = season
             frames.append(p)
@@ -1308,8 +1317,7 @@ def build_site(out_path="site.html", games_path="games.csv",
     if len(upcoming):
         lin, ens = rd.fit_models(df, int(upcoming["season"].max()))
         Xu = upcoming[V3].values
-        mu, ale, epi = ens.predict_split(Xu)
-        sigma = rd.RECAL_SCALE * np.sqrt(ale + epi)
+        mu, sigma = ens.predict_dist(Xu)
         p_home = norm.cdf(mu / sigma)
         # Attribution for the Reasoning panel, against the same ensemble that
         # produced mu above rather than a linear stand-in for it.
@@ -1523,7 +1531,9 @@ thrill.</p>
 a positive margin means the home team won by that much, and every probability is
 the home team's chance of winning. Every prediction below was made by the Bayesian
 Model before it had seen the game: each week it trains only on games already
-played, exactly as it runs live. Seasons before 2021 are excluded because the model's settings were chosen
+played, exactly as it runs live. It is the same deep ensemble, with the same
+uncertainty calibration, that makes this week's picks, so this tab grades the
+predictions you are actually reading. Seasons before 2021 are excluded because the model's settings were chosen
 using that era. The current season is the only fully honest test, since every
 earlier season existed while the model was being built. Two separate report cards: Both scorecards below belong to the Bayesian
 Model, never to Vegas: "winner pick" is the model picking the game outright, and

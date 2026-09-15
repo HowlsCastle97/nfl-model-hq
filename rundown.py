@@ -39,13 +39,45 @@ def build_frame(games_path, stats_path):
     return df
 
 
+class DeployedModel:
+    """The predictive distribution the site publishes, defined exactly once.
+
+    Before this, the deployed ensemble's hyperparameters lived in fit_models and
+    the variance recalibration was applied by hand at each call site, in
+    website.py and here. That was survivable while only the This Week tab used
+    it. The Track Record now grades the same model, and both obvious shortcuts
+    would have graded something else: DeepEnsemble's defaults are not the tuned
+    ones (hidden 32 and 300 epochs against 16 and 200), and its predict_dist
+    omits RECAL_SCALE, so it is 3.9% more confident than the page. Anything that
+    needs the published mu and sigma goes through predict_dist here, so the pick
+    a reader sees and the record it is graded by cannot drift apart.
+
+    predict_split stays available because the reasoning attributions and the
+    terminal rundown use the raw aleatoric and epistemic parts.
+    """
+
+    def __init__(self):
+        self.ens = DeepEnsemble(n_members=5, hidden=16, weight_decay=1e-2,
+                                epochs=200, seed=0)
+
+    def fit(self, X, y, sample_weight=None):
+        self.ens.fit(X, y, sample_weight=sample_weight)
+        return self
+
+    def predict_split(self, X):
+        return self.ens.predict_split(X)
+
+    def predict_dist(self, X):
+        mu, aleatoric, epistemic = self.ens.predict_split(X)
+        return mu, RECAL_SCALE * np.sqrt(aleatoric + epistemic)
+
+
 def fit_models(df, asof_season):
     train = df[df["result"].notna()]
     sw = season_decay_weights(train["season"].values, asof_season, DECAY_HL)
     X, y = train[V3_COLS].values, train["y"].values
     lin = LinearGaussianModel(lam=LIN_LAM).fit(X, y, sample_weight=sw)
-    ens = DeepEnsemble(n_members=5, hidden=16, weight_decay=1e-2,
-                       epochs=200, seed=0).fit(X, y, sample_weight=sw)
+    ens = DeployedModel().fit(X, y, sample_weight=sw)
     return lin, ens
 
 
@@ -243,8 +275,8 @@ def rundown(games_path="games.csv", stats_path="team_game_stats.csv",
 
     Xu = upcoming[V3_COLS].values
     lin_mu = lin.predict_mu(Xu)
-    mu, ale, epi = ens.predict_split(Xu)
-    sigma = RECAL_SCALE * np.sqrt(ale + epi)
+    mu, sigma = ens.predict_dist(Xu)
+    epi = ens.predict_split(Xu)[2]
     p_home = norm_cdf(mu / sigma)
 
     prices = latest_prices(db_path)
