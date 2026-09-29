@@ -5,8 +5,9 @@ public website. Built by Dave (HowlsCastle97), originally alongside NPS CS 4323
 (Bayesian Methods for Neural Networks); now a personal project. A friend has
 recently added an MLB portion that needs review.
 
-Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
-`docs/` on main).
+Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
+`docs/` on main). The repo is `nfl-model-hq`, so that is the path; the
+`nfl-gambling-hq` URL written here until 2026-09-29 was never real and 404s.
 
 ## Architecture (data flows top to bottom)
 
