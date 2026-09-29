@@ -163,7 +163,10 @@ def history_tables(df, seasons=None, model_factory=None):
 # this chance of covering. Graded here at the same threshold, because a record of
 # picks the site never made would flatter or damn it for no reason.
 SPREAD_REC_P = 0.58
-REC_COLS = ["games", "ml_n", "ml_w", "ml_l", "ml_void", "ml_roi",
+REC_COLS = ["games", "all_n", "all_w", "all_l", "all_void", "all_roi",
+            "all_hit", "all_imp", "all_said",
+            "ml_n", "ml_w", "ml_l", "ml_void", "ml_roi",
+            "asp_n", "asp_w", "asp_l", "asp_push", "asp_roi",
             "sp_n", "sp_w", "sp_l", "sp_push", "sp_roi"]
 
 
@@ -178,14 +181,25 @@ def rec_records(hist, df):
 
     Two strategies, each graded the way it would have settled.
 
-    The spread recommendation is the model's side against the Vegas closing line,
-    shown on the card only when the model gives it a 58% chance or better, so the
-    same filter applies here. Priced at standard -110: a win pays 0.909 per unit
-    risked, a push is voided rather than counted as half a win, and games with no
-    closing line are not graded.
+    The spread is graded twice for the same reason the moneyline is. Every spread
+    pick is the model's side against the Vegas closing line in every game it has a
+    line for, which is the number the old accuracy table has always reported as a
+    percentage and never as money. The filtered one is the subset the card
+    actually prints, where the model gives its side a 58% chance or better.
 
-    The moneyline recommendation is the value pick: the model's win probability
-    against what the market charged for that side. The price used is the closing
+    Both settle at standard -110: a win pays 0.909 per unit risked, a push is
+    voided rather than counted as half a win, and a game with no closing line is
+    not graded at all.
+
+    The moneyline is graded twice, because the card shows two different things and
+    a reader may act on either. Every ML pick is the model's outright call, the
+    side it makes the favourite, whatever the price: that is the "ML pick" row, and
+    it is on every card whether or not anything is worth buying. The value pick is
+    the narrower one, the games where the model's number beat the price. Grading
+    only the second would leave out most of the picks the site actually publishes.
+
+    Both settle at the same closing price on the side taken. The value pick is the
+    model's win probability The price used is the closing
     Vegas moneyline out of games.csv, because Kalshi prices were only logged from
     2026 and a record that started this September would say nothing. That has two
     consequences worth stating on the page rather than burying: the Vegas price
@@ -208,13 +222,21 @@ def rec_records(hist, df):
         norm.cdf((d["mu"] - d["spread_line"]) / d["sigma"]), index=d.index)
     home_side = p_cover_home >= 0.5
     sp_p = p_cover_home.where(home_side, 1 - p_cover_home)
-    d["sp_rec"] = d["spread_line"].notna() & (sp_p >= SPREAD_REC_P)
+    has_line = d["spread_line"].notna()
+    d["sp_rec"] = has_line & (sp_p >= SPREAD_REC_P)
     home_cover = d["y"] > d["spread_line"]
-    d["sp_push"] = d["sp_rec"] & (d["y"] == d["spread_line"])
-    d["sp_win"] = d["sp_rec"] & ~d["sp_push"] & np.where(home_side, home_cover,
-                                                         ~home_cover)
+    covered = pd.Series(np.where(home_side, home_cover, ~home_cover), index=d.index)
+    on_the_number = d["y"] == d["spread_line"]
+    d["sp_push"] = d["sp_rec"] & on_the_number
+    d["sp_win"] = d["sp_rec"] & ~d["sp_push"] & covered
     d["sp_loss"] = d["sp_rec"] & ~d["sp_push"] & ~d["sp_win"]
     d["sp_profit"] = (d["sp_win"] * (SPREAD_JUICE - 1.0)) - d["sp_loss"] * 1.0
+
+    # The same side in every game with a line, unfiltered.
+    d["asp_push"] = has_line & on_the_number
+    d["asp_win"] = has_line & ~d["asp_push"] & covered
+    d["asp_loss"] = has_line & ~d["asp_push"] & ~d["asp_win"]
+    d["asp_profit"] = (d["asp_win"] * (SPREAD_JUICE - 1.0)) - d["asp_loss"] * 1.0
 
     # Moneyline value side: model probability minus the price's implied
     # probability, taking whichever side is better and only if it is positive.
@@ -232,14 +254,43 @@ def rec_records(hist, df):
     d["ml_loss"] = d["ml_rec"] & ~d["ml_void"] & ~d["ml_win"]
     d["ml_profit"] = d["ml_win"] * (dec.fillna(1.0) - 1.0) - d["ml_loss"] * 1.0
 
+    # Every ML pick: the model's own favourite, at that side's closing price,
+    # regardless of whether the price left any value in it. Nothing is filtered
+    # out here except a game with no posted moneyline.
+    fav_home = d["p_home"] >= 0.5
+    dec_all = dec_h.where(fav_home, dec_a)
+    d["all_rec"] = dec_all.notna()
+    all_won = np.where(fav_home, d["y"] > 0, d["y"] < 0)
+    d["all_void"] = d["all_rec"] & (d["y"] == 0)
+    d["all_win"] = d["all_rec"] & ~d["all_void"] & all_won
+    d["all_loss"] = d["all_rec"] & ~d["all_void"] & ~d["all_win"]
+    d["all_profit"] = d["all_win"] * (dec_all.fillna(1.0) - 1.0) - d["all_loss"] * 1.0
+    # What the prices paid for those picks implied. Carried through the aggregate
+    # so the page can say what a 64% hit rate had to clear, instead of leaving a
+    # reader to wonder how a winning record loses money.
+    d["all_imp"] = (1.0 / dec_all).where(d["all_win"] | d["all_loss"])
+    d["all_said"] = d["p_home"].where(fav_home, 1 - d["p_home"]).where(
+        d["all_win"] | d["all_loss"])
+
     def agg(g):
+        all_n = int(g["all_win"].sum() + g["all_loss"].sum())
         ml_n = int(g["ml_win"].sum() + g["ml_loss"].sum())
+        asp_n = int(g["asp_win"].sum() + g["asp_loss"].sum())
         sp_n = int(g["sp_win"].sum() + g["sp_loss"].sum())
         return pd.Series({
             "games": len(g),
+            "all_n": all_n, "all_w": int(g["all_win"].sum()),
+            "all_l": int(g["all_loss"].sum()), "all_void": int(g["all_void"].sum()),
+            "all_roi": (100 * g["all_profit"].sum() / all_n) if all_n else np.nan,
+            "all_hit": (100 * g["all_win"].sum() / all_n) if all_n else np.nan,
+            "all_imp": 100 * g["all_imp"].mean(),
+            "all_said": 100 * g["all_said"].mean(),
             "ml_n": ml_n, "ml_w": int(g["ml_win"].sum()),
             "ml_l": int(g["ml_loss"].sum()), "ml_void": int(g["ml_void"].sum()),
             "ml_roi": (100 * g["ml_profit"].sum() / ml_n) if ml_n else np.nan,
+            "asp_n": asp_n, "asp_w": int(g["asp_win"].sum()),
+            "asp_l": int(g["asp_loss"].sum()), "asp_push": int(g["asp_push"].sum()),
+            "asp_roi": (100 * g["asp_profit"].sum() / asp_n) if asp_n else np.nan,
             "sp_n": sp_n, "sp_w": int(g["sp_win"].sum()),
             "sp_l": int(g["sp_loss"].sum()), "sp_push": int(g["sp_push"].sum()),
             "sp_roi": (100 * g["sp_profit"].sum() / sp_n) if sp_n else np.nan,
@@ -291,36 +342,54 @@ def totals_history(df, seasons=None):
     return pd.DataFrame(rows)
 
 
-def ou_row(r):
-    """The over/under line on a card: the model's total against the Vegas total.
+def ou_rows(r):
+    """The over/under, in the same bold rows as everything else the model says.
 
-    Graded on the same thresholds as the spread row, 58% to call it value at -110
-    and 54.5% to call it a lean, so the two rows mean the same thing by the same
-    rule. What they do not share is a track record: the spread pick has beaten
-    52.4% in some seasons and the totals model never has, which the This Week copy
-    says out loud rather than letting a green tag imply otherwise.
+    Returns two rows, shaped like the two they sit between. The prediction row
+    reads like "Bayesian prediction": the number, then the give or take and the
+    market's number beside it. The pick row reads like "ML pick": the side, then
+    how often the model gets there.
+
+    It started as one line of small grey text under the card, which set the
+    model's total in the typeface of a footnote. A reader acts on a total the same
+    way they act on a spread, so it is sized the same.
+
+    The pick is graded on the spread row's thresholds, 58% for value at -110 and
+    54.5% for a lean, so the two mean the same thing by the same rule. What they do
+    not share is a record: the spread pick has beaten 52.4% in some seasons and the
+    totals model never has, which the This Week copy says out loud rather than
+    leaving a green tag to imply it.
+
+    Either row can be empty: no totals model at all gives two, and a game with no
+    posted total gives a prediction with nothing to pick against.
     """
     mu, sigma = r.get("tot_mu"), r.get("tot_sigma")
     if mu is None or pd.isna(mu):
-        return ""
+        return "", ""
     line = r.get("total_line")
-    shown = f'Model total <b>{mu:.1f}</b> &plusmn;{sigma:.0f}'
-    if line is None or pd.isna(line):
-        return (f'<div class="gap sprow">{shown} &middot; '
-                f'no posted total for this game yet</div>')
+    has_line = line is not None and not pd.isna(line)
+    note = (f'&plusmn;{sigma:.0f} &middot; Vegas {float(line):g}' if has_line
+            else f'&plusmn;{sigma:.0f} &middot; no posted total yet')
+    pred = (f'<div class="lrow"><span class="llab">Model total:</span> '
+            f'<span class="lval">{mu:.1f}</span> '
+            f'<span class="lnote">{note}</span></div>')
+    if not has_line:
+        return pred, ""
     p_over, p_under, p_push = prob_total_over(mu, sigma, float(line))
     side, p = ("Over", float(p_over)) if p_over >= p_under else ("Under", float(p_under))
     if p >= 0.58:
-        tag = '<span class="hit">value at a book\'s -110</span>'
+        tag = ' &middot; <span class="hit">value at a book\'s -110</span>'
     elif p >= 0.545:
-        tag = '<span style="color:var(--yellow)">slight lean at -110</span>'
+        tag = ' &middot; <span style="color:var(--yellow)">slight lean at -110</span>'
     else:
-        tag = 'no edge at -110'
-    push = (f' &middot; {p_push*100:.0f}% chance it lands exactly on {line:g}'
+        tag = ' &middot; no edge at -110'
+    push = (f' &middot; {p_push*100:.0f}% chance it lands exactly on {float(line):g}'
             if p_push > 0.005 else '')
-    return (f'<div class="gap sprow">{shown} &middot; Vegas <b>{line:g}</b> '
-            f'&middot; model takes <b>{side} {line:g}</b> {p*100:.0f}% of the time '
-            f'&middot; {tag}{push}</div>')
+    pick = (f'<div class="lrow"><span class="llab">O/U pick:</span> '
+            f'<span class="lval">{side} {float(line):g}</span> '
+            f'<span class="lpct">hits <b>{p*100:.0f}%</b> of the time{tag}{push}'
+            f'</span></div>')
+    return pred, pick
 
 
 def rec_rows(frame, label_col, label_fmt=str):
@@ -335,7 +404,9 @@ def rec_rows(frame, label_col, label_fmt=str):
         cells = [f"<td>{label_fmt(getattr(r, label_col))}</td>",
                  f"<td>{int(r.games)}</td>"]
         for n, w, l, dead, dead_word, roi in (
+                (r.all_n, r.all_w, r.all_l, r.all_void, "void", r.all_roi),
                 (r.ml_n, r.ml_w, r.ml_l, r.ml_void, "void", r.ml_roi),
+                (r.asp_n, r.asp_w, r.asp_l, r.asp_push, "push", r.asp_roi),
                 (r.sp_n, r.sp_w, r.sp_l, r.sp_push, "push", r.sp_roi)):
             if not int(n):
                 cells += ['<td>&mdash;</td>', '<td>&mdash;</td>']
@@ -345,7 +416,7 @@ def rec_rows(frame, label_col, label_fmt=str):
             cells += [f"<td>{int(w)}-{int(l)}{extra}</td>",
                       f'<td class="{cls}">{roi:+.1f}%</td>']
         out.append("<tr>" + "".join(cells) + "</tr>")
-    return "".join(out) or '<tr><td colspan="6">Nothing graded yet.</td></tr>'
+    return "".join(out) or '<tr><td colspan="10">Nothing graded yet.</td></tr>'
 
 
 def select_week(future):
@@ -563,6 +634,8 @@ h2{font-family:"Arial Narrow",sans-serif;font-size:1.15rem;text-transform:upperc
 h3{font-family:"Arial Narrow",sans-serif;font-size:.98rem;text-transform:uppercase;
   color:var(--white);margin:18px 0 4px;letter-spacing:.04em}
 table{width:100%;border-collapse:collapse;font-size:.82rem;margin:8px 0}
+.xscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.xscroll table{min-width:640px}
 th{color:var(--green);text-align:left;font-weight:600;padding:6px 7px;
   border-bottom:1px solid var(--line);text-transform:uppercase;font-size:.72rem;
   letter-spacing:.04em}
@@ -1425,7 +1498,11 @@ def game_card(r):
         spread_row = (f'<div class="gap sprow">Model covers '
                       f'<b>{side} {line}</b> {p*100:.0f}% of the time &middot; '
                       f'fair price {american(p)} &middot; {tag}</div>')
-    total_row = ou_row(r)
+    # Order: what the model thinks the game looks like, then what it would take,
+    # then what is worth buying. The two totals rows join those same groups rather
+    # than trailing after the value line, so the predictions read together and the
+    # value row keeps the last word.
+    ou_pred, ou_pick = ou_rows(r)
     return (f'<div class="card gcard tier-{verdict_tier(v)}" '
             f'data-keys="{kalshi_lookup(r["away"], r["home"])}" '
             f'data-away="{r["away"]}" data-home="{r["home"]}" '
@@ -1435,7 +1512,7 @@ def game_card(r):
             f'{r["home"]}</span><span class="date" '
             f'data-kick="{r.get("kick_iso", "")}">'
             f'{r.get("kick_txt") or r["date"]}</span></div>'
-            f'{lines}{ml_row}{value_row}{spread_row}{total_row}'
+            f'{lines}{ou_pred}{ml_row}{ou_pick}{value_row}{spread_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
             f'{sq3_row}'
             f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu, r.get("hqb", ""), r.get("aqb", ""),
@@ -1602,6 +1679,39 @@ def build_site(out_path="site.html", games_path="games.csv",
     # The weekly record covers the season in progress, since that is the one a
     # reader is following. With nothing live, the newest finished season stands in.
     rrows_season = rec_rows(rec_season, "season")
+    # Why a winning record still loses money, in the tab's own numbers. Every
+    # judgement in this paragraph is computed, including the ones a writer would
+    # normally supply: whether the model overstated itself, and which way the
+    # market's price sits against the result. A sentence that says "honest to
+    # within half a point" is a hostage to the next fifty games.
+    calib_line = ""
+    if len(rec_season):
+        a = rec_season.iloc[-1]
+        if not pd.isna(a.all_hit) and not pd.isna(a.all_imp):
+            claim = a.all_said - a.all_hit
+            if abs(claim) < 1.0:
+                honesty = "which is its own forecast, near enough"
+            elif claim > 0:
+                honesty = f"so it overstated itself by {claim:.1f} points"
+            else:
+                honesty = f"so it understated itself by {-claim:.1f} points"
+            edge = a.all_hit - a.all_imp
+            if edge > 0:
+                verdict = (f'That is {edge:.1f} points better than the price asked '
+                           f'for, which is what a real edge looks like: the number '
+                           f'to watch is whether it survives the next season.')
+            else:
+                verdict = (f'That gap is the whole game: the market charged for '
+                           f'{a.all_imp:.1f}% and delivered {a.all_hit:.1f}%, so '
+                           f'picking winners {a.all_hit:.0f}% of the time is not '
+                           f'the same as making money. The model has to be right '
+                           f'about a price, not just about a game.')
+            calib_line = (
+                f'<p class="sub"><b>Why the record and the return disagree.</b> '
+                f'Across every season here the model said its outright picks would '
+                f'win <b>{a.all_said:.1f}%</b> of the time. They won '
+                f'<b>{a.all_hit:.1f}%</b>, {honesty}. The prices those picks were '
+                f'bought at implied <b>{a.all_imp:.1f}%</b>. {verdict}</p>')
     week_season = max(live_seasons) if live_seasons else (
         int(rec_week["season"].max()) if len(rec_week) else None)
     rec_week_view = (rec_week[rec_week["season"] == week_season]
@@ -1763,28 +1873,45 @@ confidence is honest.</p>
 pick this site would have published, week by week. ROI is profit divided by the
 amount staked, so +5% means five cents back on every dollar risked and -5% means
 five cents gone.<br><br>
-<b>Moneyline value picks</b> are the games where the model's win probability beat
-what the market charged for that side. The price used is the closing Vegas
-moneyline, because Kalshi prices have only been logged here since 2026 and a
-record starting this September would say nothing at all. Two honest consequences:
-the Vegas price includes the book's cut, which makes this a slightly harder test
-than a Kalshi ask, and Kalshi's 7% fee on winnings is not deducted here. Read it
-as the record of the model's value rule, not a transcript of a Kalshi account. An
-outright tie voids the bet.<br><br>
-<b>Spread picks</b> are the model's side against the Vegas closing line, counted
-only when the model gave it a 58% chance or better, which is exactly when the card
-publishes one. Priced at standard -110, where a win returns 0.909 per unit risked
-and 52.4% is break even. Pushes are voided, not counted as half a win.<br><br>
+<b>Every ML pick</b> is the model's outright call, the side it makes the favourite,
+bought at that side's closing price whatever the price was. That is the "ML pick"
+row on every card, and most of them are not value picks: the model often likes a
+team the market likes more. It is here because those picks are published and can
+be acted on, so they should be graded.<br><br>
+<b>ML value picks only</b> is the narrower subset where the model's win probability
+beat what the market charged, which is what earns the green badge. Same games, same
+prices, a filter on top.<br><br>
+The price used for both is the closing Vegas moneyline, because Kalshi prices have
+only been logged here since 2026 and a record starting this September would say
+nothing at all. Two honest consequences: the Vegas price includes the book's cut,
+which makes this a slightly harder test than a Kalshi ask, and Kalshi's 7% fee on
+winnings is not deducted here. Read it as the record of the model's rules, not a
+transcript of a Kalshi account. An outright tie voids the bet.<br><br>
+<b>Every spread pick</b> is the model's side against the Vegas closing line in
+every game that had one. It is the same thing the accuracy table above reports as a
+percentage, shown here as money.<br><br>
+<b>Spread picks the card printed</b> is the subset where the model gave its side a
+58% chance or better, which is exactly when a spread pick appears on a card. Both
+are priced at standard -110, where a win returns 0.909 per unit risked and 52.4% is
+break even, and pushes are voided rather than counted as half a win.<br><br>
+So two of these four columns are filtered and two are not, which is the comparison
+worth reading: a filter earns its place only by beating the unfiltered version next
+to it.<br><br>
 Both counts include picks the card flagged with the missing news caution, since
 the caution is a warning and not a veto. And the warning that matters most: a
 week holds a handful of bets, so a weekly ROI of plus or minus 40% is what noise
 looks like at this sample size, not a hot or cold streak. The All seasons row is
 the only line with enough bets to mean much, and even that one is thin.</p>
-<table><tr><th>Season</th><th>Games</th><th>Moneyline value picks</th>
-<th>ML ROI</th><th>Spread picks</th><th>Spread ROI</th></tr>{rrows_season}</table>
+<div class="xscroll"><table><tr><th>Season</th><th>Games</th>
+<th>Every ML pick</th><th>ROI</th><th>ML value picks only</th><th>ROI</th>
+<th>Every spread pick</th><th>ROI</th><th>Spread picks the card printed</th>
+<th>ROI</th></tr>{rrows_season}</table></div>
+{calib_line}
 <h3>{week_rec_title}</h3>
-<table><tr><th>Week</th><th>Games</th><th>Moneyline value picks</th>
-<th>ML ROI</th><th>Spread picks</th><th>Spread ROI</th></tr>{rrows_week}</table>
+<div class="xscroll"><table><tr><th>Week</th><th>Games</th>
+<th>Every ML pick</th><th>ROI</th><th>ML value picks only</th><th>ROI</th>
+<th>Every spread pick</th><th>ROI</th><th>Spread picks the card printed</th>
+<th>ROI</th></tr>{rrows_week}</table></div>
 
 <h3>Totals model scorecard</h3>
 <p class="sub">This one is not the Bayesian Model and does not belong in the

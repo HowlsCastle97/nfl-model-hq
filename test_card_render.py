@@ -153,19 +153,20 @@ ok("do not" not in flat, "summary still asserts a team lacks its starter")
 ok("Joe Burrow started 7 of" in flat and "Baker Mayfield started 16 of" in flat,
    f"QB clause should quote both start counts: {flat[:160]}")
 
-# --- the over/under row: same grading words as the spread row, its own numbers ---
+# --- the over/under: two bold rows, sized like every other thing the model says ---
 def ou(**kw):
     r = dict(tot_mu=45.2, tot_sigma=13.3, total_line=48.5)
     r.update(kw)
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", W.ou_row(r))).strip()
+    pred, pick = W.ou_rows(r)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", pred + " " + pick)).strip()
 
 # The model is 3.3 under the posted total, so it takes the under, and the tag
 # follows the same thresholds the spread row uses.
 u = ou()
-print("ou row:", u)
+print("ou rows:", u)
 ok("Under 48.5" in u, f"model 45.2 against a 48.5 total should take the under: {u}")
 ok("value at" in u, f"a 60% side should read as value: {u}")
-ok("45.2" in u and "48.5" in u, f"both totals must be on the row: {u}")
+ok("45.2" in u and "48.5" in u, f"both totals must be shown: {u}")
 
 # A total the model agrees with is not a bet, and the words say so.
 n = ou(total_line=45.5)
@@ -182,16 +183,33 @@ ok("lands exactly on 45" in ou(total_line=45.0),
    f"whole number total did not mention the push: {ou(total_line=45.0)}")
 ok("lands exactly" not in u, f"a half point total claimed a push: {u}")
 
-# No posted total, and no totals prediction at all: two different absences.
-ok("no posted total" in ou(total_line=None), "missing line was not explained")
-ok(W.ou_row({"tot_mu": None}) == "", "a card without a totals model still drew a row")
+# No posted total, and no totals model at all: two different absences.
+np_pred, np_pick = W.ou_rows(dict(tot_mu=45.2, tot_sigma=13.3, total_line=None))
+ok("no posted total" in np_pred, "missing line was not explained")
+ok(np_pick == "", "a game with no posted total still got a pick")
+ok(W.ou_rows({"tot_mu": None}) == ("", ""),
+   "a card without a totals model still drew rows")
 
-# And the row reaches the card itself, under the spread row rather than above it.
+# The rows join the bold block: same class as the other lines, in a fixed place.
+# The prediction sits with the other predictions and the pick with the other
+# picks, so the value row keeps the last word.
 hc = card(tot_mu=45.2, tot_sigma=13.3, total_line=48.5)
-ok("Model total" in hc, "the card is missing its over/under row")
-ok(hc.index("Model covers") < hc.index("Model total"),
-   "the over/under row should sit under the spread row")
-ok("Model total" not in card(), "a card with no totals prediction grew one")
+hb = list(block(hc))
+print("bold rows with totals:", hb)
+ok(hb == ["Bayesian prediction:", "Vegas market:", "Model total:", "ML pick:",
+          "O/U pick:", "Value recommendation:"], f"totals rows out of place: {hb}")
+ok(hc.count('class="lrow"') == 6, "the totals rows are not in the bold block")
+ok(list(block(card())) == ["Bayesian prediction:", "Vegas market:", "ML pick:",
+                           "Value recommendation:"],
+   "a card with no totals prediction grew rows")
+
+# The point of the change: the total is not footnote text any more. Its value
+# carries the same class as the spread's, and nothing about it is .psmall.
+tot_row = re.search(r'<div class="lrow"><span class="llab">Model total:</span>(.*?)</div>', hc, re.S).group(1)
+ok('class="lval"' in tot_row, f"the model total is not styled as a value: {tot_row}")
+ok("psmall" not in tot_row, "the model total is still small print")
+ok("sprow" not in hc or "Model total" not in hc.split('class="gap sprow"')[1],
+   "the old small grey totals line is still on the card")
 
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else "PASS: rebuilt card"))
 

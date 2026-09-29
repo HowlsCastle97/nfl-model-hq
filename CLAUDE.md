@@ -139,16 +139,35 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
   below and should not be expected to match them.
   `rec_records` adds the other half of the tab: not how good the predictions were
   but what a flat one unit bet on every published recommendation would have done,
-  by week and by season, with ROI. Spread picks are counted at `SPREAD_REC_P =
-  0.58`, the same threshold the card uses to decide whether to print one, and
-  settled at -110 with pushes voided. Moneyline value picks are settled at the
+  by week and by season, with ROI. Four strategies, deliberately paired as two
+  unfiltered and two filtered, so a filter can only justify itself by beating the
+  column beside it. Every ML pick is the model's outright favourite at that side's
+  closing price, value or not, which is the "ML pick" row on every card; Dave acts
+  on those, so they are graded. ML value picks are the subset where the model's
+  number beat the price. Every spread pick is the model's side against the closing
+  line in every game that had one, which is the accuracy table's ATS percentage
+  expressed as money. Spread picks the card printed are the subset at
+  `SPREAD_REC_P = 0.58`, the threshold the card uses to decide whether to show one.
+  Spreads settle at -110 with pushes voided.
+  As of 2026-09-29 the pairing already says something: the 58% spread filter earns
+  its place (-3.4% against -6.8% unfiltered) and the moneyline value filter does
+  not (-6.2% against -3.0% unfiltered). Do not quietly delete either unfiltered
+  column; they are the only thing that makes those two statements possible.
+  A paragraph under the season table computes, from the All seasons row, what the
+  model claimed its picks would do, what they did, and what their prices implied
+  (65.0%, 63.8%, 65.8%). Every judgement in it, including whether the model over
+  or understated itself and which way the price gap ran, is derived rather than
+  typed: an earlier draft hardcoded "honest to within half a point" and the
+  ensemble's real gap was 1.3. Moneyline value picks are settled at the
   closing Vegas moneyline from games.csv, not at a Kalshi ask, because Kalshi
   prices have only been logged since 2026: the Vegas price carries the book's vig
   and the Kalshi 7% win fee is absent, so the table is the record of the value
   rule rather than a Kalshi statement, and the page says exactly that.
-  Totals appear in four places, all fed by `tot.DeployedTotals`: `ou_row` on each
-  card (model total, the Vegas total, which side and how often, graded on the
-  spread row's own 0.58 and 0.545 thresholds), an over/under leg per game in the
+  Totals appear in four places, all fed by `tot.DeployedTotals`: `ou_rows` on each
+  card, which returns two rows for the bold block rather than a line of grey note
+  text ("Model total" sits with the other predictions, "O/U pick" with the other
+  picks, and the value row keeps the last word), graded on the spread row's own
+  0.58 and 0.545 thresholds, an over/under leg per game in the
   Parlay Lab at -110 under the same square-3 flag, `totals_history` as its own
   scorecard on the Track Record tab, and a Bayesian 101 passage on why one part of
   this site is deliberately not Bayesian. The O/U row borrows the spread row's

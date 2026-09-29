@@ -46,12 +46,36 @@ by_week, by_season = rec_records(hist, df)
 r = by_week.iloc[0]
 
 ok(int(r.games) == 5, f"graded {r.games} games, expected 5")
+
+# Every ML pick: the model's own favourite in all five games, at that side's price,
+# value or not. g1 and g4 favour the home dog at +150 and win; g2 favours away at
+# -200 and the away side does win by 4; g3 favours home at -200 and home wins by 1;
+# g5 is a tie and voids. So 4-0 on four settled bets.
+ok(int(r.all_n) == 4, f"every-pick settled {r.all_n} bets, expected 4")
+ok(int(r.all_w) == 4 and int(r.all_l) == 0,
+   f"every-pick record {r.all_w}-{r.all_l}, expected 4-0")
+ok(int(r.all_void) == 1, f"{r.all_void} voids, expected 1 for the tie")
+# 1.5 + 1.5 from the two plus money winners, 0.5 from -200, 0.5 from -200.
+ok(abs(r.all_roi - 100 * 4.0 / 4) < 1e-9,
+   f"every-pick ROI {r.all_roi:.3f}%, expected {100.0:.3f}%")
+# The two are different populations on purpose: the value filter drops picks.
+ok(int(r.all_n) > int(r.ml_n),
+   "every ML pick should be a superset of the value picks")
 ok(int(r.ml_n) == 3, f"moneyline settled {r.ml_n} bets, expected 3 (one void)")
 ok(int(r.ml_w) == 2 and int(r.ml_l) == 1, f"moneyline record {r.ml_w}-{r.ml_l}, expected 2-1")
 ok(int(r.ml_void) == 1, f"{r.ml_void} voids, expected 1 for the tie")
 # +150 twice is 3.0 profit, one loss is -1.0, so 2.0 on 3 units staked.
 ok(abs(r.ml_roi - 100 * 2.0 / 3) < 1e-9,
    f"moneyline ROI {r.ml_roi:.3f}%, expected {100 * 2 / 3:.3f}%")
+
+# Unfiltered, every game with a line is a bet. Two land exactly on the number and
+# void: g4 at 3 on a 3, and g5 at 0 on a pick'em. The other three all cover.
+ok(int(r.asp_n) == 3, f"every-spread settled {r.asp_n} bets, expected 3")
+ok(int(r.asp_w) == 3 and int(r.asp_l) == 0,
+   f"every-spread record {r.asp_w}-{r.asp_l}, expected 3-0")
+ok(int(r.asp_push) == 2, f"{r.asp_push} pushes, expected 2")
+ok(int(r.asp_n) > int(r.sp_n),
+   "every spread pick should be a superset of the ones the card printed")
 
 ok(int(r.sp_n) == 2, f"spread settled {r.sp_n} bets, expected 2")
 ok(int(r.sp_w) == 2 and int(r.sp_l) == 0, f"spread record {r.sp_w}-{r.sp_l}, expected 2-0")
@@ -81,7 +105,7 @@ good = rec_rows(by_week, "week", lambda w: f"Week {int(w)}")
 ok('class="hit"' in good and 'class="miss"' not in good,
    f"a winning week was not coloured as one: {good}")
 losing = by_week.copy()
-losing.loc[:, ["ml_roi", "sp_roi"]] = -12.5
+losing.loc[:, ["all_roi", "ml_roi", "asp_roi", "sp_roi"]] = -12.5
 bad = rec_rows(losing, "week", lambda w: f"Week {int(w)}")
 ok('class="miss"' in bad and 'class="hit"' not in bad,
    f"a losing week was not coloured as one: {bad}")
