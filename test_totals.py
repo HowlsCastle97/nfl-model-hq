@@ -112,6 +112,60 @@ ok(abs(e["nll"] - gaussian_nll(t["y"].values, t["mu"].values,
    "evaluate's NLL drifted")
 print(f"evaluate: CRPS {e['crps']:.3f} NLL {e['nll']:.3f} RMSE {e['rmse']:.3f}")
 
+# --- The quantile path. A quantile engine is scored without assuming a shape, so
+# the way to test those functions is to feed them a shape whose answers are known:
+# the exact quantiles of a Gaussian. Everything should come back agreeing with the
+# closed form, within the error of a 23 point grid.
+from models import (crps_from_quantiles, moments_from_quantiles,
+                    nll_from_quantiles, prob_total_over_quantiles)
+
+TAUS = np.array([0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45,
+                 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99])
+gm, gs = np.array([45.0, 38.0, 52.0]), np.array([13.0, 10.0, 16.0])
+gy = np.array([44.0, 51.0, 30.0])
+GQ = gm[:, None] + gs[:, None] * norm.ppf(TAUS)[None, :]
+
+cq = crps_from_quantiles(gy, GQ, TAUS)
+cg = crps_gaussian(gy, gm, gs)
+ok(np.allclose(cq, cg, rtol=0.03),
+   f"quantile CRPS {cq.round(3)} disagrees with the closed form {cg.round(3)}")
+print(f"quantile CRPS {cq.round(3)} vs Gaussian closed form {cg.round(3)}")
+
+mq, sq = moments_from_quantiles(GQ, TAUS)
+ok(np.allclose(mq, gm, atol=0.2), f"recovered means {mq.round(2)} not {gm}")
+# Truncation at 1% and 99% loses a little of the tail, so sd comes back low. The
+# test pins the direction and the size, because a surprise here would silently
+# make every published sigma too small.
+ok(np.all(sq < gs) and np.all(sq > 0.9 * gs),
+   f"recovered sds {sq.round(2)} should sit just under {gs}")
+print(f"recovered sd {sq.round(2)} against true {gs} (truncation, as expected)")
+
+po_q, pu_q, pp_q = prob_total_over_quantiles(GQ, TAUS, np.array([45.0, 38.5, 52.0]))
+po_g, pu_g, pp_g = prob_total_over(gm, gs, np.array([45.0, 38.5, 52.0]))
+ok(np.allclose(po_q, po_g, atol=0.02),
+   f"quantile over probabilities {po_q.round(3)} vs Gaussian {po_g.round(3)}")
+ok(abs(pp_q[1]) < 1e-9, "a half point strike pushed in the quantile version")
+ok(pp_q[0] > 0 and pp_q[2] > 0, "whole number strikes got no push mass")
+print(f"P(over) quantile {po_q.round(3)} vs Gaussian {po_g.round(3)}")
+
+# A result outside the grid must cost a lot and stay finite. An infinite NLL would
+# take a whole season's average with it.
+far = nll_from_quantiles(np.array([120.0]), GQ[:1], TAUS)
+mid = nll_from_quantiles(np.array([45.0]), GQ[:1], TAUS)
+ok(np.isfinite(far).all(), "a total outside the quantile grid gave infinite NLL")
+ok(far[0] > mid[0] + 2, f"an absurd total scored {far[0]:.2f} against {mid[0]:.2f}")
+print(f"NLL at the mean {mid[0]:.2f}, at 120 points {far[0]:.2f}, both finite")
+
+# Sorting is not optional: separate quantile fits can cross, and a crossed row
+# would make the CDF non monotone and the density negative.
+crossed = GQ.copy()
+crossed[:, [5, 6]] = crossed[:, [6, 5]]
+ok(np.allclose(crps_from_quantiles(gy, np.sort(crossed, axis=1), TAUS), cq),
+   "sorting a crossed row changed its CRPS")
+mS, sS = moments_from_quantiles(crossed, TAUS)
+ok(np.allclose(sS, sq), "moments_from_quantiles did not sort its input")
+print("crossed quantiles are sorted before use")
+
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail
               else "PASS: totals scoring, push mass and the target hook"))
 raise SystemExit(1 if fail else 0)

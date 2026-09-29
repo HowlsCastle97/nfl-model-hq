@@ -11,7 +11,7 @@ def season_decay_weights(train_seasons, asof_season, half_life_seasons):
 
 
 def walk_forward(df, feature_cols, test_season, lam=0.0, half_life_seasons=np.inf,
-                 model_factory=None, target="y", keep_cols=()):
+                 model_factory=None, target="y", keep_cols=(), quantiles=None):
     """Refit weekly on all games strictly before each test week; predict that week.
 
     model_factory() must return an object with fit(X, y, sample_weight) and
@@ -24,6 +24,10 @@ def walk_forward(df, feature_cols, test_season, lam=0.0, half_life_seasons=np.in
     returned frame always calls the truth "y", so evaluate does not need to know
     which target was asked for. keep_cols carries extra test columns through
     untouched, which is how the market's own total rides along for comparison.
+
+    quantiles asks a model that can produce them for a quantile function per game,
+    stored as q<tau> columns. A model without predict_quantiles ignores it, so one
+    harness can grade a Gaussian and a quantile engine side by side.
     """
     if model_factory is None:
         model_factory = lambda: LinearGaussianModel(lam=lam)
@@ -46,6 +50,10 @@ def walk_forward(df, feature_cols, test_season, lam=0.0, half_life_seasons=np.in
         chunk["y"] = test[target].values
         chunk["mu"] = mu
         chunk["sigma"] = sigma
+        if quantiles is not None and hasattr(model, "predict_quantiles"):
+            Q = model.predict_quantiles(test[feature_cols].values, quantiles)
+            for k, tau in enumerate(quantiles):
+                chunk[f"q{tau:g}"] = Q[:, k]
         out.append(chunk)
     return pd.concat(out, ignore_index=True)
 

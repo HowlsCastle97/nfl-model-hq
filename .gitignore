@@ -13,3 +13,7 @@ logs/
 # feature did not ship, so nothing in production reads it.
 injury_player_weeks.csv
 nflverse_cache/
+
+# publish_prices.py writes here when run by hand; the real feed lives on the
+# prices branch and the scheduled run writes logs/prices.json.
+prices.json

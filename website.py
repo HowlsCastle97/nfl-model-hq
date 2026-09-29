@@ -7,7 +7,9 @@ import pandas as pd
 from scipy.stats import norm
 
 import rundown as rd
+import totals as tot
 from features import FEATURE_COLS
+from models import prob_total_over
 from walkforward import walk_forward
 
 V3 = rd.V3_COLS
@@ -252,6 +254,75 @@ def rec_records(hist, df):
     return by_week, by_season
 
 
+def totals_history(df, seasons=None):
+    """Walk-forward scorecard for the totals model, one row per season.
+
+    A separate model from the Bayesian one and therefore a separate scorecard,
+    which is the whole reason it gets its own table on the page rather than two
+    more columns on the existing one. Graded two ways: how far the predicted total
+    landed from the real one, and how often it beat the closing total, which is
+    the only question a bettor is asking.
+
+    Pushes are dropped, as a book would settle them. 52.4% is break even at -110.
+    """
+    played = df[df["y_total"].notna()]
+    if seasons is None:
+        last = int(played["season"].max()) if len(played) else TRACK_FIRST_SEASON
+        seasons = range(TRACK_FIRST_SEASON, last + 1)
+    rows = []
+    for season in seasons:
+        if not (played["season"] == season).any():
+            continue
+        p = walk_forward(played, tot.TOTAL_COLS, season,
+                         half_life_seasons=tot.TOTAL_DECAY_HL,
+                         model_factory=tot.DeployedTotals, target="y_total",
+                         keep_cols=("total_line",))
+        if not len(p):
+            continue
+        graded = p[p["total_line"].notna() & (p["y"] != p["total_line"])]
+        over = graded["mu"] > graded["total_line"]
+        hit = (over == (graded["y"] > graded["total_line"])).mean() if len(graded) else np.nan
+        rows.append({"season": season, "games": len(p),
+                     "avg_miss": float((p["y"] - p["mu"]).abs().mean()),
+                     "graded": int(len(graded)),
+                     "ou_pct": 100 * float(hit),
+                     "mean_total": float(p["mu"].mean()),
+                     "mean_actual": float(p["y"].mean())})
+    return pd.DataFrame(rows)
+
+
+def ou_row(r):
+    """The over/under line on a card: the model's total against the Vegas total.
+
+    Graded on the same thresholds as the spread row, 58% to call it value at -110
+    and 54.5% to call it a lean, so the two rows mean the same thing by the same
+    rule. What they do not share is a track record: the spread pick has beaten
+    52.4% in some seasons and the totals model never has, which the This Week copy
+    says out loud rather than letting a green tag imply otherwise.
+    """
+    mu, sigma = r.get("tot_mu"), r.get("tot_sigma")
+    if mu is None or pd.isna(mu):
+        return ""
+    line = r.get("total_line")
+    shown = f'Model total <b>{mu:.1f}</b> &plusmn;{sigma:.0f}'
+    if line is None or pd.isna(line):
+        return (f'<div class="gap sprow">{shown} &middot; '
+                f'no posted total for this game yet</div>')
+    p_over, p_under, p_push = prob_total_over(mu, sigma, float(line))
+    side, p = ("Over", float(p_over)) if p_over >= p_under else ("Under", float(p_under))
+    if p >= 0.58:
+        tag = '<span class="hit">value at a book\'s -110</span>'
+    elif p >= 0.545:
+        tag = '<span style="color:var(--yellow)">slight lean at -110</span>'
+    else:
+        tag = 'no edge at -110'
+    push = (f' &middot; {p_push*100:.0f}% chance it lands exactly on {line:g}'
+            if p_push > 0.005 else '')
+    return (f'<div class="gap sprow">{shown} &middot; Vegas <b>{line:g}</b> '
+            f'&middot; model takes <b>{side} {line:g}</b> {p*100:.0f}% of the time '
+            f'&middot; {tag}{push}</div>')
+
+
 def rec_rows(frame, label_col, label_fmt=str):
     """One HTML row per period of the recommendation record.
 
@@ -338,6 +409,22 @@ def build_parlays(upcoming_rows, top_n=10):
             # most extreme spread opinions into the credible bands unflagged.
             legs.append({"game": f"{r['away']}@{r['home']}",
                          "team": side, "desc": f"{side} {line}{opp[side]}",
+                         "p": p, "dec": SPREAD_JUICE,
+                         "wild": square3_gap(p, 0.5) > SQUARE3_SIGMAS})
+        tmu, tsig, tl = r.get("tot_mu"), r.get("tot_sigma"), r.get("total_line")
+        if (tmu is not None and not pd.isna(tmu)
+                and tl is not None and not pd.isna(tl)):
+            p_over, p_under, _ = prob_total_over(tmu, tsig, float(tl))
+            ou, p = (("Over", float(p_over)) if p_over >= p_under
+                     else ("Under", float(p_under)))
+            # A fair total implies a coin flip either way, so the disagreement is
+            # probit(p), the same shape as the spread leg. The team field is the
+            # game itself: a total is not a side, and using one of the two team
+            # names here would let a parlay pair the over with that team's
+            # moneyline as though they were independent.
+            legs.append({"game": f"{r['away']}@{r['home']}",
+                         "team": f"{r['away']}@{r['home']} total",
+                         "desc": f"{ou} {float(tl):g} ({r['away']} at {r['home']})",
                          "p": p, "dec": SPREAD_JUICE,
                          "wild": square3_gap(p, 0.5) > SQUARE3_SIGMAS})
     parlays = []
@@ -912,6 +999,22 @@ chance it beats the spread is the cover probability. A market price is also a
 probability, since 65 cents means 65%. Value exists only when the model's number
 and the price disagree by more than the fees, in a game where the room agrees.
 Most weeks that is a short list. That is the design working, not failing.</p>
+<p><b>The one part of this site that is not Bayesian.</b> Over/unders are priced
+by a different model, on purpose. The margin question is "who wins and how sure are
+we", where the whole value of the answer is the honesty of the uncertainty, and
+that is what the Bayesian machinery above is for. A total is a different animal:
+the thing being predicted is a count, its spread barely changes from game to game,
+and what matters is the shape of the whole distribution rather than a belief about
+weights. So the engines were made to compete on one measure, CRPS, which scores an
+entire predicted distribution against the single number that actually happened, and
+the winner shipped. The room of neural networks lost. Boosted trees lost, and lost
+by more the more capacity they were given. A large pretrained tabular transformer,
+a model that has never seen a football game and does its learning inside a single
+forward pass over the data you hand it, finished a hair ahead on one season and
+inside the noise on the next. What won was a plain weighted least squares fit on
+pace, points per drive, both offences, both defences and the weather. Two lessons
+worth keeping: more model is not more accuracy, and a method earns its place by
+measurement, not by being the most interesting one in the room.</p>
 <p><b>What this model honestly cannot see.</b> Injuries announced this week,
 coaches resting starters, weather. Every green badge gets a human news check before
 anything happens. When the market disagrees with the model, the market is usually
@@ -1322,6 +1425,7 @@ def game_card(r):
         spread_row = (f'<div class="gap sprow">Model covers '
                       f'<b>{side} {line}</b> {p*100:.0f}% of the time &middot; '
                       f'fair price {american(p)} &middot; {tag}</div>')
+    total_row = ou_row(r)
     return (f'<div class="card gcard tier-{verdict_tier(v)}" '
             f'data-keys="{kalshi_lookup(r["away"], r["home"])}" '
             f'data-away="{r["away"]}" data-home="{r["home"]}" '
@@ -1331,7 +1435,7 @@ def game_card(r):
             f'{r["home"]}</span><span class="date" '
             f'data-kick="{r.get("kick_iso", "")}">'
             f'{r.get("kick_txt") or r["date"]}</span></div>'
-            f'{lines}{ml_row}{value_row}{spread_row}'
+            f'{lines}{ml_row}{value_row}{spread_row}{total_row}'
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
             f'{sq3_row}'
             f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu, r.get("hqb", ""), r.get("aqb", ""),
@@ -1344,6 +1448,7 @@ def build_site(out_path="site.html", games_path="games.csv",
     df = rd.build_frame(games_path, stats_path)
     hist, by_season, calib = history_tables(df)
     rec_week, rec_season = rec_records(hist, df)
+    tot_hist = totals_history(df)
 
     today = pd.Timestamp.today().normalize()
     future = df[df["result"].isna() & (df["gameday"] >= today)]
@@ -1388,6 +1493,10 @@ def build_site(out_path="site.html", games_path="games.csv",
                                done_now["away_team"]]).value_counts().to_dict()
         _train = df[df["result"].notna()][V3].values
         contrib = rd.feature_contributions(ens, Xu, rd.neutral_row(_train))
+        # The totals model is a separate engine with its own features, fitted on
+        # the same completed games. Cheap enough to refit here every build.
+        tmodel = tot.fit_totals(df, cur)
+        tot_mu, tot_sigma = tmodel.predict_dist(upcoming[tot.TOTAL_COLS].values)
         prices = rd.latest_prices(db_path)
         price_age = ""
         try:
@@ -1417,6 +1526,8 @@ def build_site(out_path="site.html", games_path="games.csv",
                                 .replace(" 0", " ")),
                    "played": min(played_by.get(row.home_team, 0),
                                  played_by.get(row.away_team, 0)),
+                   "tot_mu": float(tot_mu[j]), "tot_sigma": float(tot_sigma[j]),
+                   "total_line": getattr(row, "total_line", None),
                    "fam_h": getattr(row, "qb_fam_home", None),
                    "fam_a": getattr(row, "qb_fam_away", None),
                    "hqb": getattr(row, "home_qb_name", "") or "",
@@ -1499,6 +1610,20 @@ def build_site(out_path="site.html", games_path="games.csv",
     week_rec_title = (f"{week_season} week by week" if week_season is not None
                       else "Week by week")
 
+    # Quoted in the This Week copy. Taken from the table rather than typed, because
+    # a hardcoded "best season" is a sentence that goes quietly wrong in October.
+    tot_best_txt = "no season graded yet"
+    if len(tot_hist):
+        _b = tot_hist.loc[tot_hist["ou_pct"].idxmax()]
+        tot_best_txt = f"best season {_b.ou_pct:.1f}% in {int(_b.season)}"
+    trows = "".join(
+        f'<tr><td>{int(r.season)}{" (live)" if int(r.season) in live_seasons else ""}</td>'
+        f'<td>{int(r.games)}</td><td>{r.mean_total:.1f}</td>'
+        f'<td>{r.mean_actual:.1f}</td><td>{r.avg_miss:.1f}</td>'
+        f'<td>{r.ou_pct:.1f}% <span class="psmall">on {int(r.graded)}</span></td></tr>'
+        for r in tot_hist.itertuples(index=False)) or \
+        '<tr><td colspan="6">Nothing graded yet.</td></tr>'
+
     prow_html = []
     for p in parlays:
         cls = "ev-hi" if p["ev"] > 0.04 else "ev-md" if p["ev"] > 0 else "ev-lo"
@@ -1558,12 +1683,19 @@ after fees, yellow means an edge too small to trust, red means the price is fair
 or worse. Each card also grades the Vegas spread: the model's chance of covering
 each side, and whether that beats the 52.4% needed to profit at a standard -110.
 Every green light still gets a human news check first.</p>
+<p class="sub">New: the over/under line on each card, from a separate totals model.
+It is graded by the same words as the spread row, but it has not earned the same
+trust: across every season back to {TRACK_FIRST_SEASON} it has never beaten the
+52.4% break-even against the closing total, {tot_best_txt}. Treat a green tag there
+as the model's strongest lean on a total, not as an edge. The Track Record tab
+keeps its scorecard.</p>
 {week_note}{tier_bar}<div class="grid">{cards}</div>
 </div>
 
 <div id="parlays" class="panel">
 <h2>Parlay Lab</h2>
-<p class="sub">Combinations of moneylines (at logged Kalshi prices, fees
+<p class="sub">Now including over/unders, priced at a standard -110 like the
+spread legs and flagged by the same missing news rule. Combinations of moneylines (at logged Kalshi prices, fees
 included) and spreads (at the standard -110). Pick your risk appetite:
 <b>Safe</b> caps the payout near +120 and ranks by hit chance; these are legs
 where the model and the market mostly agree, so expect them to land often but
@@ -1653,6 +1785,21 @@ the only line with enough bets to mean much, and even that one is thin.</p>
 <h3>{week_rec_title}</h3>
 <table><tr><th>Week</th><th>Games</th><th>Moneyline value picks</th>
 <th>ML ROI</th><th>Spread picks</th><th>Spread ROI</th></tr>{rrows_week}</table>
+
+<h3>Totals model scorecard</h3>
+<p class="sub">This one is not the Bayesian Model and does not belong in the
+columns above. Over/unders are priced by a separate, simpler engine, picked by
+walk-forward score against a deep ensemble, boosted trees and a large pretrained
+tabular transformer; the plain one won, so the plain one ships. Same honesty rules:
+every number below was predicted before the game, and a season is graded only on
+games with a posted closing total, pushes dropped the way a book drops them.<br><br>
+Read the last column first. 52.4% is break even at a standard -110, and the totals
+model has never reached it. That is the point of showing the scorecard next to the
+over/under row on the cards: the model has a number for every game, and no
+demonstrated edge on any of them.</p>
+<table><tr><th>Season</th><th>Games</th><th>Model's average total</th>
+<th>Actual average</th><th>Avg miss (pts)</th>
+<th>Beat the closing total</th></tr>{trows}</table>
 {"".join(season_blocks)}
 </div>
 

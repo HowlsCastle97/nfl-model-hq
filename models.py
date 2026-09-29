@@ -90,6 +90,108 @@ def crps_ensemble(y, samples):
     return term1 - term2
 
 
+def crps_from_quantiles(y, Q, taus):
+    """CRPS of a predictive distribution given only as a set of quantiles.
+
+    CRPS is twice the integral of the pinball loss over the probability level, so
+    a model that outputs quantiles can be scored on exactly the same axis as a
+    Gaussian one with no distributional assumption bolted on afterwards. The
+    integral is a trapezoid over the tau grid, which is why the grid should reach
+    into both tails: everything outside it is invisible to this estimate.
+
+    Q is (n_obs, n_taus), taus the matching probability levels, ascending.
+    """
+    y = np.asarray(y, float)[:, None]
+    Q = np.asarray(Q, float)
+    taus = np.asarray(taus, float)
+    d = y - Q
+    pinball = np.where(d >= 0, taus * d, (taus - 1) * d)
+    return 2.0 * np.trapz(pinball, taus, axis=1)
+
+
+def quantile_density(Q, taus, tail_scale=1.0):
+    """Piecewise linear density implied by a quantile function, with exponential tails.
+
+    Between two quantiles the distribution is treated as uniform, which is the
+    only thing the quantiles actually assert. Beyond the outermost ones the mass
+    that is left over decays exponentially at the rate of the nearest interval,
+    so a value outside the grid gets a finite density instead of a zero that
+    would make NLL infinite.
+
+    Returns a function of y, vectorised over the same rows as Q.
+    """
+    Q = np.sort(np.asarray(Q, float), axis=1)
+    taus = np.asarray(taus, float)
+    widths = np.diff(Q, axis=1)
+    widths = np.maximum(widths, 1e-6)
+    dens = np.diff(taus)[None, :] / widths
+    lo_rate = dens[:, 0] / max(taus[0], 1e-6)
+    hi_rate = dens[:, -1] / max(1 - taus[-1], 1e-6)
+
+    def pdf(y):
+        y = np.asarray(y, float)
+        out = np.empty(len(y))
+        for i, v in enumerate(y):
+            row = Q[i]
+            if v < row[0]:
+                out[i] = taus[0] * lo_rate[i] * np.exp(
+                    -lo_rate[i] * (row[0] - v) / max(tail_scale, 1e-6))
+            elif v > row[-1]:
+                out[i] = (1 - taus[-1]) * hi_rate[i] * np.exp(
+                    -hi_rate[i] * (v - row[-1]) / max(tail_scale, 1e-6))
+            else:
+                j = min(np.searchsorted(row, v, side="right") - 1, len(row) - 2)
+                out[i] = dens[i, j]
+        return np.maximum(out, 1e-12)
+
+    return pdf
+
+
+def nll_from_quantiles(y, Q, taus):
+    """Negative log predictive density under the piecewise linear quantile fit."""
+    return -np.log(quantile_density(Q, taus)(y))
+
+
+def moments_from_quantiles(Q, taus):
+    """Mean and sd of the distribution a quantile grid describes.
+
+    The quantile function integrated over tau, by trapezoid. Truncated at the
+    outermost tau, so the sd is a slight underestimate; that is stated rather than
+    corrected, since correcting it would mean inventing tails.
+    """
+    Q = np.sort(np.asarray(Q, float), axis=1)
+    taus = np.asarray(taus, float)
+    span = taus[-1] - taus[0]
+    mu = np.trapz(Q, taus, axis=1) / span
+    var = np.trapz((Q - mu[:, None]) ** 2, taus, axis=1) / span
+    return mu, np.sqrt(var)
+
+
+def prob_total_over_quantiles(Q, taus, strike, push_half_point=0.5):
+    """Over, under and push probability read straight off a quantile function.
+
+    The CDF at a point is found by inverting the grid linearly. A whole number
+    strike gets the same half point of push mass the Gaussian version uses, so the
+    two engines price a push the same way and only their shapes differ.
+    """
+    Q = np.sort(np.asarray(Q, float), axis=1)
+    taus = np.asarray(taus, float)
+    strike = np.atleast_1d(np.asarray(strike, float))
+    whole = np.isclose(strike, np.round(strike))
+    hi = np.where(whole, strike + push_half_point, strike)
+    lo = np.where(whole, strike - push_half_point, strike)
+
+    def cdf(v):
+        out = np.empty(len(Q))
+        for i in range(len(Q)):
+            out[i] = np.interp(v[i], Q[i], taus, left=0.0, right=1.0)
+        return out
+
+    p_under = cdf(lo)
+    p_over = 1.0 - cdf(hi)
+    return p_over, p_under, np.clip(1.0 - p_over - p_under, 0.0, 1.0)
+
+
 def prob_total_over(mu, sigma, strike, push_half_point=0.5):
     """P(total > strike) under a Gaussian, with the push handled.
 

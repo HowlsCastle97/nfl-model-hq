@@ -153,6 +153,46 @@ ok("do not" not in flat, "summary still asserts a team lacks its starter")
 ok("Joe Burrow started 7 of" in flat and "Baker Mayfield started 16 of" in flat,
    f"QB clause should quote both start counts: {flat[:160]}")
 
+# --- the over/under row: same grading words as the spread row, its own numbers ---
+def ou(**kw):
+    r = dict(tot_mu=45.2, tot_sigma=13.3, total_line=48.5)
+    r.update(kw)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", W.ou_row(r))).strip()
+
+# The model is 3.3 under the posted total, so it takes the under, and the tag
+# follows the same thresholds the spread row uses.
+u = ou()
+print("ou row:", u)
+ok("Under 48.5" in u, f"model 45.2 against a 48.5 total should take the under: {u}")
+ok("value at" in u, f"a 60% side should read as value: {u}")
+ok("45.2" in u and "48.5" in u, f"both totals must be on the row: {u}")
+
+# A total the model agrees with is not a bet, and the words say so.
+n = ou(total_line=45.5)
+ok("no edge" in n, f"a coin flip total should read as no edge: {n}")
+ok("value at" not in n and "lean" not in n, f"a coin flip claimed something: {n}")
+
+# Between the two thresholds is a lean, never value.
+l = ou(total_line=47.5)
+ok("lean" in l, f"a 55% side should read as a lean: {l}")
+
+# A whole number total can land exactly on the line. The row says so, and a half
+# point total must never mention a push, because it cannot happen.
+ok("lands exactly on 45" in ou(total_line=45.0),
+   f"whole number total did not mention the push: {ou(total_line=45.0)}")
+ok("lands exactly" not in u, f"a half point total claimed a push: {u}")
+
+# No posted total, and no totals prediction at all: two different absences.
+ok("no posted total" in ou(total_line=None), "missing line was not explained")
+ok(W.ou_row({"tot_mu": None}) == "", "a card without a totals model still drew a row")
+
+# And the row reaches the card itself, under the spread row rather than above it.
+hc = card(tot_mu=45.2, tot_sigma=13.3, total_line=48.5)
+ok("Model total" in hc, "the card is missing its over/under row")
+ok(hc.index("Model covers") < hc.index("Model total"),
+   "the over/under row should sit under the spread row")
+ok("Model total" not in card(), "a card with no totals prediction grew one")
+
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else "PASS: rebuilt card"))
 
 sys.exit(1 if fail else 0)

@@ -67,13 +67,22 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   Tuned: hidden=16, weight_decay=1e-2, epochs=200. `predict_split` returns
   (mu, aleatoric, epistemic); mixture variance = E[sigma^2] + Var[mu].
 - `totals.py`: the totals model, a separate engine from the margin one (design
-  principle 7). `TotalsEnsemble` is the margin architecture pointed at `y_total`,
-  `ConstantModel` is the floor, and `market_baseline` scores the closing Vegas
-  total as a predictive distribution so a CRPS number has something to mean.
-  `python totals.py --seasons 2024 2025` prints the walk-forward table. Results
-  as of 2026-09-28 are under "Totals engine results" below: the baseline deep
-  ensemble loses to the ridge linear model on the same features, which is the
-  opposite of the margin result and the reason step 3 exists.
+  principle 7). `DeployedTotals` is what ships and is the single definition of the
+  published total, the way `rd.DeployedModel` is for margins: ridge on
+  `TOTAL_COLS`, no variance recalibration because its sigma came back honest
+  (z sd 0.97 and 1.01). `fit_totals` fits it on every completed game with the
+  usual season decay. The losing candidates stay in the file because a measured
+  loss is worth keeping: `TotalsEnsemble` (the margin architecture on this
+  target), `QuantileGBM` (LightGBM quantile regression on a 23 level grid),
+  `HeteroLinear` (ridge mean, ridge log sigma), `TotalsTabPFN` (in-context
+  inference, no per-week refit), `ConstantModel` as the floor, and
+  `market_baseline` so a CRPS number has a scale. `python totals.py` prints the
+  walk-forward table; `experiment_totals.py` is the pre-registered comparison.
+  Full results under "Totals engine results" below. lightgbm and tabpfn are
+  imported inside the two losing classes rather than at the top of the file and
+  are deliberately **not** in requirements.txt: the site build never touches them,
+  and putting them in the workflow's install would add minutes per run for code
+  that only the experiment calls. `pip install lightgbm tabpfn` to rerun it.
 - `walkforward.py`: weekly-refit walk-forward harness; `model_factory` hook lets
   any fit/predict_dist model drop in. Season decay weights (half-life 2.0).
   `target` picks the column to predict ("y" for margin, "y_total" for totals) and
@@ -136,6 +145,17 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   prices have only been logged since 2026: the Vegas price carries the book's vig
   and the Kalshi 7% win fee is absent, so the table is the record of the value
   rule rather than a Kalshi statement, and the page says exactly that.
+  Totals appear in four places, all fed by `tot.DeployedTotals`: `ou_row` on each
+  card (model total, the Vegas total, which side and how often, graded on the
+  spread row's own 0.58 and 0.545 thresholds), an over/under leg per game in the
+  Parlay Lab at -110 under the same square-3 flag, `totals_history` as its own
+  scorecard on the Track Record tab, and a Bayesian 101 passage on why one part of
+  this site is deliberately not Bayesian. The O/U row borrows the spread row's
+  vocabulary but not its standing: the totals model has never beaten 52.4% in
+  backtest, best season 51.1%, so the This Week copy says in as many words that a
+  green tag there is the model's strongest lean and not a measured edge. Do not
+  quietly drop that sentence; it is the only thing keeping the shared vocabulary
+  honest (principle 3).
 - `run_v2.py` / `run_deliverable2.py`: reproduction scripts for the model
   comparison tables (2024 validation, 2025 test).
 
@@ -267,15 +287,18 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
    this question, and the motivating count used 2021-2025, so any revised design
    must be pre-registered and confirmed prospectively on 2026, not re-tested on
    the same held-out seasons.
-6. Totals and joint pricing. Possession-based Monte Carlo simulation (pace times
-   per-drive scoring from EPA matchups) as the future totals and joint
-   margin-total engine; gives key-number mass and coherent same-game pricing.
-   Gaussian copula with residual correlation estimated from history to join the
-   margin and total models. Once KXNFLTOTAL logging is confirmed, grade O/U
-   against real Kalshi totals prices instead of the Vegas line. This supersedes
-   the old backlog line that described totals as the same pipeline with the
-   target swapped: a totals engine is chosen on its own merits by walk-forward
-   CRPS, and is not required to be the margin model wearing a different target.
+6. Totals and joint pricing. The first pass shipped on 2026-09-29: ridge on
+   `TOTAL_COLS`, chosen by walk-forward CRPS against four other engines, live on
+   the cards, in the Parlay Lab and with its own Track Record scorecard. What is
+   left. Possession-based Monte Carlo simulation (pace times per-drive scoring from
+   EPA matchups) as the future totals and joint margin-total engine; gives key
+   number mass, which a Gaussian over a quantity that piles up on 41, 44 and 47
+   cannot, and coherent same-game pricing. Gaussian copula with residual
+   correlation estimated from history to join the margin and total models. Grade
+   O/U against the logged `KXNFLTOTAL` ladder instead of the Vegas line, which is
+   now possible: see the note under "Totals engine results". Any new engine is
+   still chosen on its own merits by CRPS and is not required to be the margin
+   model wearing a different target.
 7. Backlog: parse Kalshi spread-market strikes from logged subtitle/floor_strike
    once real KXNFLSPREAD rows accumulate and compute spread edges against real
    prices (currently graded against Vegas line at -110); backtest engine over
@@ -283,8 +306,76 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
 
 ## Totals engine results
 
-Step 2 of the totals build, measured 2026-09-28, walk-forward, weekly refit,
-season decay half-life 2.0, features `TOTAL_COLS`. CRPS in points, lower better.
+**What shipped: ridge on `TOTAL_COLS`.** Four engines were tried against it on
+walk-forward CRPS under a rule fixed before the numbers were read: an engine ships
+only if its held-out CRPS beats ridge with a paired bootstrap interval excluding
+zero. None did. The deep ensemble and the boosted quantile trees lost outright; the
+heteroscedastic linear and TabPFN could not be separated from ridge. So the
+candidate that is a closed form solve and fits in a second won on grounds that were
+not accuracy.
+
+Held out 2025, read once (n=272, 4000 resample paired bootstrap on per game CRPS):
+
+| engine | CRPS | NLL | RMSE | O/U vs the line | minus ridge |
+|---|---|---|---|---|---|
+| closing Vegas total | 7.430 | 3.998 | 13.19 | n/a | -0.032 [-0.248, +0.184] |
+| **ridge (shipped)** | **7.463** | **4.002** | **13.24** | **50.7%** | baseline |
+| TabPFN v2, full context | 7.418 | 3.992 | 13.22 | 49.3% | -0.045 [-0.119, +0.030] |
+
+Tuning season 2024, where the hyperparameters were chosen and nothing is held out:
+
+| engine | CRPS | NLL | sd | O/U | minus ridge |
+|---|---|---|---|---|---|
+| ridge | 7.172 | 3.975 | 13.19 | 50.2% | baseline |
+| deep ensemble (step 2) | 7.319 | 3.986 | 12.44 | 49.4% | +0.147 [-0.013, +0.303] |
+| hetero linear, sigma_lam 4000 | 7.169 | 3.976 | 12.91 | 50.2% | -0.003 [-0.013, +0.006] |
+| LightGBM q, 3 leaves 150 trees | 7.234 | 4.159 | 12.01 | 48.3% | +0.062 [-0.026, +0.155] |
+| LightGBM q, 3 leaves 400 trees | 7.292 | 4.199 | 11.84 | 46.1% | +0.120 [+0.017, +0.224] |
+| LightGBM q, 7 leaves | 7.429 | 4.336 | 11.01 | 47.2% | +0.257 [+0.115, +0.395] |
+| LightGBM q, 15 leaves | 7.515 | 4.383 | 10.22 | 46.1% | +0.343 [+0.167, +0.524] |
+| TabPFN v2, full context | 7.144 | 3.974 | 12.04 | 49.1% | -0.028 [-0.095, +0.041] |
+| TabPFN v2, recent context only | 7.172 | 3.980 | 11.95 | 49.4% | +0.000 [-0.086, +0.089] |
+
+What to take from it, and what not to repeat:
+
+- **Capacity is the enemy on this target.** The boosted trees lose monotonically in
+  the number of leaves: 3 leaves +0.06, 7 leaves +0.26, 15 leaves +0.34. The deep
+  ensemble lost the same way. 272 games a season of a quantity with a 13 point
+  spread does not support a flexible mean function. Do not bring a bigger model to
+  this problem without a reason that is not "it worked on margins".
+- **The spread really is constant.** `HeteroLinear` let sigma vary with the same
+  features and moved CRPS by -0.003 with the interval through zero, at every
+  regularisation tried. A windy December game is not measurably more predictable
+  than a dome game once the mean model has used the weather.
+- **TabPFN is the one that nearly worked.** Nominally best in both seasons, and
+  never separable from ridge. Worth revisiting on 2.5 or 3.5 weights, which need a
+  Prior Labs account: only v2 downloads anonymously, and `--tabpfn-version` takes
+  the rest once that login exists. **CPU timing measured here** (16 threads, 3,900
+  row context, 16 games): 173s per week on the default `n_estimators='auto'`, 25s
+  at `n_estimators=1`, and the week's CRPS moves 0.006 between them, so one member
+  is the default in `TotalsTabPFN`. Mean and the whole quantile grid come back from
+  a single forward pass; asking separately doubled the bill. A season of
+  walk-forward is 8 to 9 minutes, which is fine for research and too slow for the
+  weekly build.
+- **The quantile engines were scored on their own shape**, not on a Gaussian fitted
+  to them: `crps_from_quantiles` (twice the pinball integral),
+  `nll_from_quantiles` (piecewise linear density with exponential tails) and
+  `moments_from_quantiles`. Note the last one truncates at the 1% and 99% levels,
+  so any sd read off a quantile grid is about 5% low; that is measured in
+  `test_totals.py` rather than corrected, because correcting it would mean
+  inventing tails.
+- **2025 is now spent on the totals question.** It was read once, for the winner
+  and the baselines. Anything new here needs 2026 or later.
+- **Kalshi totals are live and parseable.** `KXNFLTOTAL` has been logging since
+  2026-08-27: `floor_strike` carries a clean half point strike, `yes_sub_title`
+  reads "Over X points", and each game has a ladder of strikes, which is a
+  market-implied distribution rather than a single number. Half point strikes
+  cannot push. Grading O/U against those prices instead of the Vegas line is the
+  next real step and needs no new plumbing.
+
+The step 2 baseline table follows, for the record. Measured 2026-09-28,
+walk-forward, weekly refit, season decay half-life 2.0, features `TOTAL_COLS`.
+CRPS in points, lower better.
 
 | season | engine | CRPS | NLL | RMSE | mean mu | mean sigma | z sd | O/U hit |
 |---|---|---|---|---|---|---|---|---|
