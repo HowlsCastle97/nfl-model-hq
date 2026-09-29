@@ -157,6 +157,126 @@ def history_tables(df, seasons=None, model_factory=None):
     return hist, by_season, calib
 
 
+# The card publishes a spread pick only when the model gives its side at least
+# this chance of covering. Graded here at the same threshold, because a record of
+# picks the site never made would flatter or damn it for no reason.
+SPREAD_REC_P = 0.58
+REC_COLS = ["games", "ml_n", "ml_w", "ml_l", "ml_void", "ml_roi",
+            "sp_n", "sp_w", "sp_l", "sp_push", "sp_roi"]
+
+
+def american_dec(ml):
+    """Decimal payout from an American moneyline, NaN safe."""
+    ml = pd.to_numeric(ml, errors="coerce")
+    return np.where(ml > 0, 1 + ml / 100.0, 1 + 100.0 / np.abs(ml))
+
+
+def rec_records(hist, df):
+    """Betting record of the two recommendations the site publishes, by week.
+
+    Two strategies, each graded the way it would have settled.
+
+    The spread recommendation is the model's side against the Vegas closing line,
+    shown on the card only when the model gives it a 58% chance or better, so the
+    same filter applies here. Priced at standard -110: a win pays 0.909 per unit
+    risked, a push is voided rather than counted as half a win, and games with no
+    closing line are not graded.
+
+    The moneyline recommendation is the value pick: the model's win probability
+    against what the market charged for that side. The price used is the closing
+    Vegas moneyline out of games.csv, because Kalshi prices were only logged from
+    2026 and a record that started this September would say nothing. That has two
+    consequences worth stating on the page rather than burying: the Vegas price
+    carries the book's vig, which makes this a slightly harder test than a Kalshi
+    ask, and Kalshi's 7% fee on the win is not in these numbers. So this is the
+    record of the model's value rule, not a transcript of what a Kalshi account
+    would show. An outright tie voids the bet.
+
+    ROI is profit over amount staked, void and pushed bets excluded from both.
+    """
+    if hist.empty:
+        empty = pd.DataFrame(columns=["season", "week"] + REC_COLS)
+        return empty, empty.copy()
+
+    d = hist.merge(df[["game_id", "home_moneyline", "away_moneyline"]],
+                   on="game_id", how="left").copy()
+
+    # Spread side and its cover probability, the card's own calculation.
+    p_cover_home = pd.Series(
+        norm.cdf((d["mu"] - d["spread_line"]) / d["sigma"]), index=d.index)
+    home_side = p_cover_home >= 0.5
+    sp_p = p_cover_home.where(home_side, 1 - p_cover_home)
+    d["sp_rec"] = d["spread_line"].notna() & (sp_p >= SPREAD_REC_P)
+    home_cover = d["y"] > d["spread_line"]
+    d["sp_push"] = d["sp_rec"] & (d["y"] == d["spread_line"])
+    d["sp_win"] = d["sp_rec"] & ~d["sp_push"] & np.where(home_side, home_cover,
+                                                         ~home_cover)
+    d["sp_loss"] = d["sp_rec"] & ~d["sp_push"] & ~d["sp_win"]
+    d["sp_profit"] = (d["sp_win"] * (SPREAD_JUICE - 1.0)) - d["sp_loss"] * 1.0
+
+    # Moneyline value side: model probability minus the price's implied
+    # probability, taking whichever side is better and only if it is positive.
+    dec_h = pd.Series(american_dec(d["home_moneyline"]), index=d.index)
+    dec_a = pd.Series(american_dec(d["away_moneyline"]), index=d.index)
+    edge_h = d["p_home"] - 1.0 / dec_h
+    edge_a = (1 - d["p_home"]) - 1.0 / dec_a
+    take_home = edge_h >= edge_a
+    edge = edge_h.where(take_home, edge_a)
+    dec = dec_h.where(take_home, dec_a)
+    d["ml_rec"] = edge.notna() & (edge > 0)
+    won = np.where(take_home, d["y"] > 0, d["y"] < 0)
+    d["ml_void"] = d["ml_rec"] & (d["y"] == 0)
+    d["ml_win"] = d["ml_rec"] & ~d["ml_void"] & won
+    d["ml_loss"] = d["ml_rec"] & ~d["ml_void"] & ~d["ml_win"]
+    d["ml_profit"] = d["ml_win"] * (dec.fillna(1.0) - 1.0) - d["ml_loss"] * 1.0
+
+    def agg(g):
+        ml_n = int(g["ml_win"].sum() + g["ml_loss"].sum())
+        sp_n = int(g["sp_win"].sum() + g["sp_loss"].sum())
+        return pd.Series({
+            "games": len(g),
+            "ml_n": ml_n, "ml_w": int(g["ml_win"].sum()),
+            "ml_l": int(g["ml_loss"].sum()), "ml_void": int(g["ml_void"].sum()),
+            "ml_roi": (100 * g["ml_profit"].sum() / ml_n) if ml_n else np.nan,
+            "sp_n": sp_n, "sp_w": int(g["sp_win"].sum()),
+            "sp_l": int(g["sp_loss"].sum()), "sp_push": int(g["sp_push"].sum()),
+            "sp_roi": (100 * g["sp_profit"].sum() / sp_n) if sp_n else np.nan,
+        })
+
+    by_week = d.groupby(["season", "week"]).apply(
+        agg, include_groups=False).reset_index()
+    by_season = d.groupby("season").apply(agg, include_groups=False).reset_index()
+    allrow = agg(d)
+    allrow["season"] = "All seasons"
+    by_season = pd.concat([by_season, allrow.to_frame().T], ignore_index=True)
+    return by_week, by_season
+
+
+def rec_rows(frame, label_col, label_fmt=str):
+    """One HTML row per period of the recommendation record.
+
+    A period with no recommendation of a given kind prints a dash rather than a
+    0-0 record and a 0% return, because "we did not advise anything" and "we
+    advised things and broke even" are different weeks.
+    """
+    out = []
+    for r in frame.itertuples(index=False):
+        cells = [f"<td>{label_fmt(getattr(r, label_col))}</td>",
+                 f"<td>{int(r.games)}</td>"]
+        for n, w, l, dead, dead_word, roi in (
+                (r.ml_n, r.ml_w, r.ml_l, r.ml_void, "void", r.ml_roi),
+                (r.sp_n, r.sp_w, r.sp_l, r.sp_push, "push", r.sp_roi)):
+            if not int(n):
+                cells += ['<td>&mdash;</td>', '<td>&mdash;</td>']
+                continue
+            extra = f", {int(dead)} {dead_word}" if int(dead) else ""
+            cls = "hit" if roi > 0 else "miss" if roi < 0 else ""
+            cells += [f"<td>{int(w)}-{int(l)}{extra}</td>",
+                      f'<td class="{cls}">{roi:+.1f}%</td>']
+        out.append("<tr>" + "".join(cells) + "</tr>")
+    return "".join(out) or '<tr><td colspan="6">Nothing graded yet.</td></tr>'
+
+
 def select_week(future):
     """The earliest NFL week that still has an unplayed game, and its caption.
 
@@ -353,6 +473,8 @@ nav button.on{background:var(--green);border-color:var(--green);color:#08120b}
 .nomatch{color:var(--dim);font-size:.85rem;margin:10px 0}
 h2{font-family:"Arial Narrow",sans-serif;font-size:1.15rem;text-transform:uppercase;
   color:var(--green);margin:18px 0 8px}
+h3{font-family:"Arial Narrow",sans-serif;font-size:.98rem;text-transform:uppercase;
+  color:var(--white);margin:18px 0 4px;letter-spacing:.04em}
 table{width:100%;border-collapse:collapse;font-size:.82rem;margin:8px 0}
 th{color:var(--green);text-align:left;font-weight:600;padding:6px 7px;
   border-bottom:1px solid var(--line);text-transform:uppercase;font-size:.72rem;
@@ -1221,6 +1343,7 @@ def build_site(out_path="site.html", games_path="games.csv",
                prices_url=DEFAULT_PRICES_URL, mlb_feed=DEFAULT_MLB_FEED):
     df = rd.build_frame(games_path, stats_path)
     hist, by_season, calib = history_tables(df)
+    rec_week, rec_season = rec_records(hist, df)
 
     today = pd.Timestamp.today().normalize()
     future = df[df["result"].isna() & (df["gameday"] >= today)]
@@ -1365,6 +1488,17 @@ def build_site(out_path="site.html", games_path="games.csv",
         f'<td>{r.home_actually_won:.0f}%</td></tr>'
         for idx, r in calib.iterrows())
 
+    # The weekly record covers the season in progress, since that is the one a
+    # reader is following. With nothing live, the newest finished season stands in.
+    rrows_season = rec_rows(rec_season, "season")
+    week_season = max(live_seasons) if live_seasons else (
+        int(rec_week["season"].max()) if len(rec_week) else None)
+    rec_week_view = (rec_week[rec_week["season"] == week_season]
+                     if week_season is not None else rec_week)
+    rrows_week = rec_rows(rec_week_view, "week", lambda w: f"Week {int(w)}")
+    week_rec_title = (f"{week_season} week by week" if week_season is not None
+                      else "Week by week")
+
     prow_html = []
     for p in parlays:
         cls = "ev-hi" if p["ev"] > 0.04 else "ev-md" if p["ev"] > 0 else "ev-lo"
@@ -1490,6 +1624,35 @@ confidence is honest.</p>
 <table><tr><th>Games grouped by prediction</th><th>Games</th>
 <th>The group's predictions averaged</th><th>Home teams in the group actually won</th></tr>
 {crows}</table>
+
+<h3>Recommendation record</h3>
+<p class="sub">The two tables above grade predictions. These two grade
+<b>recommendations</b>: what would have happened to a flat one unit bet on every
+pick this site would have published, week by week. ROI is profit divided by the
+amount staked, so +5% means five cents back on every dollar risked and -5% means
+five cents gone.<br><br>
+<b>Moneyline value picks</b> are the games where the model's win probability beat
+what the market charged for that side. The price used is the closing Vegas
+moneyline, because Kalshi prices have only been logged here since 2026 and a
+record starting this September would say nothing at all. Two honest consequences:
+the Vegas price includes the book's cut, which makes this a slightly harder test
+than a Kalshi ask, and Kalshi's 7% fee on winnings is not deducted here. Read it
+as the record of the model's value rule, not a transcript of a Kalshi account. An
+outright tie voids the bet.<br><br>
+<b>Spread picks</b> are the model's side against the Vegas closing line, counted
+only when the model gave it a 58% chance or better, which is exactly when the card
+publishes one. Priced at standard -110, where a win returns 0.909 per unit risked
+and 52.4% is break even. Pushes are voided, not counted as half a win.<br><br>
+Both counts include picks the card flagged with the missing news caution, since
+the caution is a warning and not a veto. And the warning that matters most: a
+week holds a handful of bets, so a weekly ROI of plus or minus 40% is what noise
+looks like at this sample size, not a hot or cold streak. The All seasons row is
+the only line with enough bets to mean much, and even that one is thin.</p>
+<table><tr><th>Season</th><th>Games</th><th>Moneyline value picks</th>
+<th>ML ROI</th><th>Spread picks</th><th>Spread ROI</th></tr>{rrows_season}</table>
+<h3>{week_rec_title}</h3>
+<table><tr><th>Week</th><th>Games</th><th>Moneyline value picks</th>
+<th>ML ROI</th><th>Spread picks</th><th>Spread ROI</th></tr>{rrows_week}</table>
 {"".join(season_blocks)}
 </div>
 

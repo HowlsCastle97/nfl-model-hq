@@ -127,6 +127,15 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   picks. It used to grade the ridge linear model, a different model from the one
   readers act on. So its numbers are NOT the pinned linear reproduction numbers
   below and should not be expected to match them.
+  `rec_records` adds the other half of the tab: not how good the predictions were
+  but what a flat one unit bet on every published recommendation would have done,
+  by week and by season, with ROI. Spread picks are counted at `SPREAD_REC_P =
+  0.58`, the same threshold the card uses to decide whether to print one, and
+  settled at -110 with pushes voided. Moneyline value picks are settled at the
+  closing Vegas moneyline from games.csv, not at a Kalshi ask, because Kalshi
+  prices have only been logged since 2026: the Vegas price carries the book's vig
+  and the Kalshi 7% win fee is absent, so the table is the record of the value
+  rule rather than a Kalshi statement, and the page says exactly that.
 - `run_v2.py` / `run_deliverable2.py`: reproduction scripts for the model
   comparison tables (2024 validation, 2025 test).
 
