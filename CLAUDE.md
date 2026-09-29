@@ -28,6 +28,17 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   `qb_fam_diff` together. Kept as the foundation for injury work, where "the
   listed starter is out, rate his backup" is exactly the case a whole-season
   average dilutes.
+  Also carries the totals side, which is sums where the margin side is
+  differences: `TOTAL_COLS`. Pace and scoring volume (plays, drives, points per
+  drive, for and against) ride the same 8 game EWMA as the EPA states, from the
+  pace columns `prep_pbp.py` now writes. A team with no history starts on
+  `PACE_PRIOR`, structural league numbers rather than zero, so no row ever
+  divides by zero drives. Weather is the first input that is unknown at
+  prediction time: `weather_columns` gives a covered roof neutral values (70F,
+  no wind), uses a real reading outdoors, and otherwise falls back to the median
+  of outdoor games played in the same calendar month, taken from completed games
+  only. A game day forecast goes in through `build_features(weather_override=...)`,
+  keyed by game_id.
 - `prep_pbp.py`: nflverse play-by-play download and per-team-game EPA
   aggregation (parquet cache ~300 MB, gitignored). Two modes. A full build walks
   every season and short-circuits on `team_game_stats.csv`, which is right once
@@ -55,8 +66,21 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
   trained on beta-NLL (beta=0.5) to avoid the sigma-swallows-gradient pathology.
   Tuned: hidden=16, weight_decay=1e-2, epochs=200. `predict_split` returns
   (mu, aleatoric, epistemic); mixture variance = E[sigma^2] + Var[mu].
+- `totals.py`: the totals model, a separate engine from the margin one (design
+  principle 7). `TotalsEnsemble` is the margin architecture pointed at `y_total`,
+  `ConstantModel` is the floor, and `market_baseline` scores the closing Vegas
+  total as a predictive distribution so a CRPS number has something to mean.
+  `python totals.py --seasons 2024 2025` prints the walk-forward table. Results
+  as of 2026-09-28 are under "Totals engine results" below: the baseline deep
+  ensemble loses to the ridge linear model on the same features, which is the
+  opposite of the margin result and the reason step 3 exists.
 - `walkforward.py`: weekly-refit walk-forward harness; `model_factory` hook lets
   any fit/predict_dist model drop in. Season decay weights (half-life 2.0).
+  `target` picks the column to predict ("y" for margin, "y_total" for totals) and
+  drops rows where it is NaN, so a season in progress grades only what has been
+  played; `keep_cols` carries market columns through to the graded frame.
+  `evaluate` reports CRPS alongside NLL, since CRPS is what selects the totals
+  engine and NLL alone is too easily dominated by one 70 point game.
 - `rundown.py`: deployment constants (RECAL_SCALE=1.039 variance recalibration,
   LIN_LAM=100). `DeployedModel` is the single definition of the distribution
   the site publishes: the tuned ensemble plus RECAL_SCALE, via `predict_dist`.
@@ -132,6 +156,9 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
    translations accompany technical numbers ("SEA -2", ML odds).
 6. Dave's writing preference: no em dashes or hyphens as sentence punctuation in
    any written deliverable; use commas, colons, semicolons.
+7. Totals (over/unders) use a non-Bayesian engine selected by walk-forward CRPS;
+   margin and moneyline models remain Bayesian. The two are separate models; a
+   Gaussian copula joins them later for same-game combos.
 
 ## Environment quirks (Windows, Anaconda base, Python 3.13)
 
@@ -231,11 +258,61 @@ Live site: https://howlscastle97.github.io/nfl-gambling-hq/ (GitHub Pages from
    this question, and the motivating count used 2021-2025, so any revised design
    must be pre-registered and confirmed prospectively on 2026, not re-tested on
    the same held-out seasons.
-6. Backlog: parse Kalshi spread-market strikes from logged subtitle/floor_strike
+6. Totals and joint pricing. Possession-based Monte Carlo simulation (pace times
+   per-drive scoring from EPA matchups) as the future totals and joint
+   margin-total engine; gives key-number mass and coherent same-game pricing.
+   Gaussian copula with residual correlation estimated from history to join the
+   margin and total models. Once KXNFLTOTAL logging is confirmed, grade O/U
+   against real Kalshi totals prices instead of the Vegas line. This supersedes
+   the old backlog line that described totals as the same pipeline with the
+   target swapped: a totals engine is chosen on its own merits by walk-forward
+   CRPS, and is not required to be the margin model wearing a different target.
+7. Backlog: parse Kalshi spread-market strikes from logged subtitle/floor_strike
    once real KXNFLSPREAD rows accumulate and compute spread edges against real
-   prices (currently graded against Vegas line at -110); totals model (target =
-   total points, same pipeline; enables over/unders); backtest engine over
+   prices (currently graded against Vegas line at -110); backtest engine over
    logged prices; fractional Kelly sizing.
+
+## Totals engine results
+
+Step 2 of the totals build, measured 2026-09-28, walk-forward, weekly refit,
+season decay half-life 2.0, features `TOTAL_COLS`. CRPS in points, lower better.
+
+| season | engine | CRPS | NLL | RMSE | mean mu | mean sigma | z sd | O/U hit |
+|---|---|---|---|---|---|---|---|---|
+| 2024 | closing Vegas total | 6.994 | 3.952 | 12.55 | 44.3 | 13.3 fitted | 0.94 | n/a |
+| 2024 | constant | 7.288 | 3.996 | 13.11 | 45.0 | 13.67 | 0.96 | 49.8% |
+| 2024 | ridge linear | 7.172 | 3.975 | 12.86 | 44.4 | 13.19 | 0.97 | 50.2% |
+| 2024 | deep ensemble | 7.319 | 3.986 | 13.12 | 44.2 | 12.44 | 1.04 | 49.4% |
+| 2025 | closing Vegas total | 7.430 | 3.998 | 13.19 | 44.9 | 13.3 fitted | 1.00 | n/a |
+| 2025 | constant | 7.807 | 4.045 | 13.81 | 45.4 | 13.67 | 1.01 | 46.0% |
+| 2025 | ridge linear | 7.463 | 4.002 | 13.24 | 46.0 | 13.19 | 1.01 | 50.7% |
+| 2025 | deep ensemble | 7.527 | 4.008 | 13.31 | 45.9 | 12.69 | 1.05 | 48.5% |
+
+Paired bootstrap on per-game CRPS, 4000 resamples, pooled over both seasons
+(n=544): linear minus market +0.105 [-0.034, +0.239]; ensemble minus linear
++0.106 [-0.013, +0.223]; linear minus constant -0.230 [-0.391, -0.067];
+ensemble minus constant -0.125 [-0.320, +0.068].
+
+What that says, and what to do with it:
+
+- The features carry real information about totals. Linear beats the constant by
+  an interval that excludes zero. That is the one clean positive result here.
+- The deep ensemble, the engine that wins on margins, does not transfer. It is
+  worse than the linear model in both seasons and cannot be separated from the
+  constant. Do not assume the margin architecture is the right starting point for
+  a new target; on 272 games a season, a 5 by 16 MLP ensemble has more capacity
+  than a total will support.
+- Nothing beats the closing line, as expected. The market is the scale, not the
+  opponent: it was detectably better than the linear model in 2024 and
+  indistinguishable in 2025.
+- Sigma runs honest for the linear model (z sd 0.97 to 1.01) and 4 to 5% too
+  confident for the ensemble (1.04 to 1.05), the same direction the margin model
+  needed `RECAL_SCALE` for. `TotalsEnsemble(recal=...)` is where that would go,
+  and no number has been baked in yet.
+- Every O/U hit rate is below the 52.4% break-even, best case 50.7%. So an
+  over/under row on the site is information, not a betting edge, and any green
+  value badge on totals would be claiming something no backtest supports. That is
+  a copy decision to make deliberately when step 5 lands.
 
 ## Testing conventions
 

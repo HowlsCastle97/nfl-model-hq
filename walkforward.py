@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from models import LinearGaussianModel, gaussian_nll
+from models import LinearGaussianModel, gaussian_nll, crps_gaussian
 
 
 def season_decay_weights(train_seasons, asof_season, half_life_seasons):
@@ -11,16 +11,24 @@ def season_decay_weights(train_seasons, asof_season, half_life_seasons):
 
 
 def walk_forward(df, feature_cols, test_season, lam=0.0, half_life_seasons=np.inf,
-                 model_factory=None):
+                 model_factory=None, target="y", keep_cols=()):
     """Refit weekly on all games strictly before each test week; predict that week.
 
     model_factory() must return an object with fit(X, y, sample_weight) and
     predict_dist(X). Defaults to LinearGaussianModel(lam). Swap in the MLP
     wrapper for Deliverable III.
+
+    target names the column to predict, "y" (home margin) by default and
+    "y_total" for the totals model. Rows where it is NaN are dropped from train
+    and test both, so a season in progress grades only what has been played. The
+    returned frame always calls the truth "y", so evaluate does not need to know
+    which target was asked for. keep_cols carries extra test columns through
+    untouched, which is how the market's own total rides along for comparison.
     """
     if model_factory is None:
         model_factory = lambda: LinearGaussianModel(lam=lam)
 
+    df = df[df[target].notna()]
     out = []
     test_weeks = sorted(df.loc[df["season"] == test_season, "week"].unique())
     for wk in test_weeks:
@@ -31,9 +39,11 @@ def walk_forward(df, feature_cols, test_season, lam=0.0, half_life_seasons=np.in
             continue
         sw = season_decay_weights(train["season"].values, test_season, half_life_seasons)
         model = model_factory()
-        model.fit(train[feature_cols].values, train["y"].values, sample_weight=sw)
+        model.fit(train[feature_cols].values, train[target].values, sample_weight=sw)
         mu, sigma = model.predict_dist(test[feature_cols].values)
-        chunk = test[["game_id", "season", "week", "home_team", "away_team", "y"]].copy()
+        cols = ["game_id", "season", "week", "home_team", "away_team"] + list(keep_cols)
+        chunk = test[cols].copy()
+        chunk["y"] = test[target].values
         chunk["mu"] = mu
         chunk["sigma"] = sigma
         out.append(chunk)
@@ -46,6 +56,8 @@ def evaluate(preds):
         "n": len(preds),
         "nll": float(gaussian_nll(preds["y"].values, preds["mu"].values,
                                   preds["sigma"].values).mean()),
+        "crps": float(crps_gaussian(preds["y"].values, preds["mu"].values,
+                                    preds["sigma"].values).mean()),
         "rmse": float(np.sqrt((r**2).mean())),
         "mae": float(r.abs().mean()),
     }

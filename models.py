@@ -60,5 +60,73 @@ def gaussian_nll(y, mu, sigma):
     return 0.5 * np.log(2 * np.pi * sigma**2) + (y - mu) ** 2 / (2 * sigma**2)
 
 
+def crps_gaussian(y, mu, sigma):
+    """Continuous ranked probability score, closed form for a Gaussian.
+
+    In points, and lower is better. It scores the whole predictive distribution
+    against the single number that happened, and unlike NLL it does not blow up
+    on one badly placed outlier, which is why it is the yardstick for the totals
+    engines: a 70 point game should cost a model something, not everything.
+    """
+    y, mu, sigma = np.asarray(y, float), np.asarray(mu, float), np.asarray(sigma, float)
+    z = (y - mu) / sigma
+    return sigma * (z * (2 * norm.cdf(z) - 1) + 2 * norm.pdf(z) - 1 / np.sqrt(np.pi))
+
+
+def crps_ensemble(y, samples):
+    """CRPS from samples, for a predictive distribution with no closed form.
+
+    Energy form: E|Y - y| minus half E|Y - Y'|, both over the sample set.
+    samples is (n_obs, n_samples). Exact for the empirical distribution, so a
+    simulator and a Gaussian can be compared on one scale.
+    """
+    y = np.asarray(y, float)[:, None]
+    S = np.sort(np.asarray(samples, float), axis=1)
+    m = S.shape[1]
+    term1 = np.abs(S - y).mean(axis=1)
+    # The pairwise sum over a sorted row collapses to a single weighted sum.
+    w = (2 * np.arange(m) + 1 - m)
+    term2 = (S * w).sum(axis=1) / (m * m)
+    return term1 - term2
+
+
+def prob_total_over(mu, sigma, strike, push_half_point=0.5):
+    """P(total > strike) under a Gaussian, with the push handled.
+
+    A whole number total can land exactly on the strike, which is a push and
+    neither a win nor a loss. A continuous distribution gives that outcome zero
+    mass, so a naive tail probability quietly prices a push as a loss for the
+    over. The continuity correction spreads the integer's mass over the interval
+    around it and returns the three parts explicitly.
+
+    Returns (p_over, p_under, p_push). A half point strike cannot push, so its
+    push mass is zero and the other two sum to one.
+    """
+    mu, sigma = np.asarray(mu, float), np.asarray(sigma, float)
+    strike = np.asarray(strike, float)
+    whole = np.isclose(strike, np.round(strike))
+    hi = np.where(whole, strike + push_half_point, strike)
+    lo = np.where(whole, strike - push_half_point, strike)
+    p_over = 1.0 - norm.cdf((hi - mu) / sigma)
+    p_under = norm.cdf((lo - mu) / sigma)
+    return p_over, p_under, np.clip(1.0 - p_over - p_under, 0.0, 1.0)
+
+
+def prob_total_over_pmf(support, pmf, strike):
+    """The same three way split for a discrete predictive distribution.
+
+    support is the grid of totals the distribution is defined on, pmf the mass on
+    each point, either one row shared or one row per game. Mass sitting exactly
+    on a whole number strike is the push, taken literally instead of approximated.
+    """
+    support = np.asarray(support, float)
+    P = np.atleast_2d(np.asarray(pmf, float))
+    strike = np.atleast_1d(np.asarray(strike, float))[:, None]
+    over = support[None, :] > strike
+    under = support[None, :] < strike
+    push = ~(over | under)
+    return ((P * over).sum(axis=1), (P * under).sum(axis=1), (P * push).sum(axis=1))
+
+
 def prob_margin_over(mu, sigma, strike):
     return 1.0 - norm.cdf((strike - mu) / sigma)

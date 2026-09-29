@@ -6,9 +6,34 @@ FRANCHISE_MAP = {"OAK": "LV", "SD": "LAC", "STL": "LA"}
 
 EPA_STATS = ["off_epa_pass", "off_epa_rush", "def_epa_pass", "def_epa_rush", "cpoe"]
 
+# Pace and scoring volume, from prep_pbp. Carried per team with the same EWMA as
+# the EPA states. These feed the totals model, which needs how often a game gets
+# snapped and how much each possession is worth, not who is better.
+PACE_STATS = ["off_plays", "off_drives", "off_points",
+              "def_plays", "def_drives", "def_points"]
+
+# What a team looks like before it has played a game, so the first row of 2010
+# is not a team with zero drives. These are league structural numbers (about 11
+# drives and 65 snaps a side, about 21 offensive points), not anything fitted to
+# this dataset, and they wash out within a season of the 8 game half-life.
+PACE_PRIOR = {"off_plays": 64.0, "off_drives": 11.3, "off_points": 21.0,
+              "def_plays": 64.0, "def_drives": 11.3, "def_points": 21.0}
+
+# Weather a covered game gets: the roof is the point, so neutral means calm and
+# mild rather than the outdoor average.
+NEUTRAL_TEMP, NEUTRAL_WIND = 70.0, 0.0
+
 FEATURE_COLS = ["pdiff_ewma_diff", "off_pass_diff", "off_rush_diff",
                 "def_pass_diff", "def_rush_diff", "cpoe_diff",
                 "rest_diff", "div_game"]
+
+# Totals inputs are sums, not differences: two good offences and two bad ones
+# give the same margin and a very different total, so every matchup term is
+# added rather than subtracted.
+TOTAL_COLS = ["plays_sum", "plays_allowed_sum", "drives_sum", "drives_allowed_sum",
+              "off_ppd_sum", "def_ppd_sum",
+              "off_pass_sum", "off_rush_sum", "def_pass_sum", "def_rush_sum",
+              "cpoe_sum", "game_temp", "game_wind", "indoor"]
 
 
 def load_games(path, first_season=2010, reg_only=True, keep_unplayed=False):
@@ -41,10 +66,64 @@ def load_qb_game_stats(path):
     return out
 
 
+def weather_columns(df, override=None):
+    """Temperature and wind as the model should see them, one value per game.
+
+    Three cases. A covered roof gets NEUTRAL_TEMP and NEUTRAL_WIND, because the
+    weather is not in the building and an average outdoor day would be a fiction.
+    An outdoor game with a reading uses it. An outdoor game without one, which is
+    every game that has not kicked off, gets the median of outdoor games played
+    in the same calendar month, so a December game is cold and a September game
+    is not, without anybody pretending to know Sunday's forecast.
+
+    Those medians come from completed games only. They are climate, not outcome,
+    but taking them from the same rows the model is about to predict would be the
+    kind of shortcut that is hard to argue with later.
+
+    override, keyed by game_id, wins over all of it: that is where a real
+    forecast goes on game day.
+    """
+    def col(name):
+        """A numeric column, or an all-missing one if this frame has no such column.
+
+        Synthetic frames in the tests carry only the columns under test, and a
+        weather reading is exactly the kind of thing they leave out. Missing is
+        already a case this function handles, so it should not be an error.
+        """
+        if name not in df.columns:
+            return pd.Series(np.nan, index=df.index, dtype=float)
+        return pd.to_numeric(df[name], errors="coerce")
+
+    indoor = (df["roof"].isin(["dome", "closed"]) if "roof" in df.columns
+              else pd.Series(False, index=df.index))
+    temp, wind = col("temp"), col("wind")
+    gd = (pd.to_datetime(df["gameday"], errors="coerce") if "gameday" in df.columns
+          else pd.Series(pd.NaT, index=df.index))
+    month = gd.dt.month
+    played_outdoor = (~indoor) & df["result"].notna()
+    ht, hw = played_outdoor & temp.notna(), played_outdoor & wind.notna()
+    tn = temp[ht].groupby(month[ht]).median()
+    wn = wind[hw].groupby(month[hw]).median()
+    temp = temp.fillna(month.map(tn)).fillna(
+        float(tn.median()) if len(tn) else NEUTRAL_TEMP)
+    wind = wind.fillna(month.map(wn)).fillna(
+        float(wn.median()) if len(wn) else NEUTRAL_WIND)
+    temp = temp.where(~indoor, NEUTRAL_TEMP)
+    wind = wind.where(~indoor, NEUTRAL_WIND)
+    if override:
+        for gid, w in override.items():
+            m = df["game_id"] == gid
+            if "temp" in w:
+                temp = temp.where(~m, float(w["temp"]))
+            if "wind" in w:
+                wind = wind.where(~m, float(w["wind"]))
+    return temp.astype(float).values, wind.astype(float).values
+
+
 def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 21),
                    epa_season_revert=1.0, form_season_revert=1.0, qb_lookup=None,
                    qb_half_life_dropbacks=600.0, qb_prior_n=300.0,
-                   qb_prior_mean=-0.05):
+                   qb_prior_mean=-0.05, weather_override=None):
     """Leakage-safe features, chronologically.
 
     epa_season_revert and form_season_revert are experiment knobs and default to
@@ -57,6 +136,11 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
     ratings admit a roster turns over and the EPA features do not. Whether
     fixing it helps is a question for walk-forward, not for taste, so the
     default stays where the tuned numbers were measured.
+
+    weather_override is a game_id keyed dict of {"temp": F, "wind": mph} for
+    game day forecasts. An unplayed outdoor game has no weather in games.csv, so
+    without an override it gets the seasonal norm for its month, which is a
+    deliberate "no information" value rather than a guess at Sunday.
     """
     df = df.copy()
     decay = 0.5 ** (1.0 / form_half_life_games)
@@ -65,6 +149,8 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
 
     home_form = np.empty(len(df))
     away_form = np.empty(len(df))
+    pace_state = {}
+    pace_sides = {s: (np.empty(len(df)), np.empty(len(df))) for s in PACE_STATS}
     home_qbfam = np.empty(len(df))
     away_qbfam = np.empty(len(df))
     qb_hist = {}
@@ -100,6 +186,9 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
 
     def get_state(team):
         return epa_state.setdefault(team, {s: 0.0 for s in EPA_STATS})
+
+    def get_pace(team):
+        return pace_state.setdefault(team, dict(PACE_PRIOR))
 
     def familiarity(team, qb_id):
         hist = qb_hist.setdefault(team, deque(maxlen=16))
@@ -140,6 +229,10 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
             for s in EPA_STATS:
                 epa_sides[s][0][i] = hs[s]
                 epa_sides[s][1][i] = as_[s]
+            hp, ap = get_pace(h), get_pace(a)
+            for s in PACE_STATS:
+                pace_sides[s][0][i] = hp[s]
+                pace_sides[s][1][i] = ap[s]
         if pd.isna(row.result):
             continue
         margin = float(row.result)
@@ -158,11 +251,20 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
                 s[0] = f * s[0] + e
                 s[1] = f * s[1] + n
         if stats_lookup is not None:
-            for team, state in ((h, get_state(h)), (a, get_state(a))):
+            for team in (h, a):
                 obs = stats_lookup.get((row.game_id, team))
-                if obs is not None:
-                    for s in EPA_STATS:
-                        state[s] = decay * state[s] + (1 - decay) * getattr(obs, s)
+                if obs is None:
+                    continue
+                state = get_state(team)
+                for s in EPA_STATS:
+                    state[s] = decay * state[s] + (1 - decay) * getattr(obs, s)
+                pace = get_pace(team)
+                for s in PACE_STATS:
+                    # A stats file written before pace existed simply leaves the
+                    # prior in place rather than crashing the whole build.
+                    v = getattr(obs, s, None)
+                    if v is not None and not pd.isna(v):
+                        pace[s] = decay * pace[s] + (1 - decay) * float(v)
 
     df["pdiff_ewma_diff"] = home_form - away_form
     # Not in V3_COLS: an experiment feature, opted into by name.
@@ -184,10 +286,44 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
         df["def_pass_diff"] = epa_sides["def_epa_pass"][0] - epa_sides["def_epa_pass"][1]
         df["def_rush_diff"] = epa_sides["def_epa_rush"][0] - epa_sides["def_epa_rush"][1]
         df["cpoe_diff"] = epa_sides["cpoe"][0] - epa_sides["cpoe"][1]
+        # The same states added instead of subtracted. Nothing here is a model
+        # input for margin; these exist for the totals model.
+        df["off_pass_sum"] = epa_sides["off_epa_pass"][0] + epa_sides["off_epa_pass"][1]
+        df["off_rush_sum"] = epa_sides["off_epa_rush"][0] + epa_sides["off_epa_rush"][1]
+        df["def_pass_sum"] = epa_sides["def_epa_pass"][0] + epa_sides["def_epa_pass"][1]
+        df["def_rush_sum"] = epa_sides["def_epa_rush"][0] + epa_sides["def_epa_rush"][1]
+        df["cpoe_sum"] = epa_sides["cpoe"][0] + epa_sides["cpoe"][1]
+        df["plays_sum"] = pace_sides["off_plays"][0] + pace_sides["off_plays"][1]
+        df["plays_allowed_sum"] = pace_sides["def_plays"][0] + pace_sides["def_plays"][1]
+        df["drives_sum"] = pace_sides["off_drives"][0] + pace_sides["off_drives"][1]
+        df["drives_allowed_sum"] = (pace_sides["def_drives"][0]
+                                    + pace_sides["def_drives"][1])
+        # Points per drive, each side's own EWMA points over its own EWMA drives.
+        # Both denominators start at the prior and are averages of positive
+        # counts, so neither can reach zero.
+        df["off_ppd_sum"] = (pace_sides["off_points"][0] / pace_sides["off_drives"][0]
+                             + pace_sides["off_points"][1] / pace_sides["off_drives"][1])
+        df["def_ppd_sum"] = (pace_sides["def_points"][0] / pace_sides["def_drives"][0]
+                             + pace_sides["def_points"][1] / pace_sides["def_drives"][1])
+
+    temp, wind = weather_columns(df, weather_override)
+    df["game_temp"] = temp
+    df["game_wind"] = wind
 
     hr = df["home_rest"].clip(*rest_clip).fillna(7)
     ar = df["away_rest"].clip(*rest_clip).fillna(7)
     df["rest_diff"] = hr - ar
     df["div_game"] = df["div_game"].fillna(0).astype(int)
     df["y"] = df["result"].astype(float)
+    # The totals target. NaN wherever the game has not been played, exactly like
+    # y, so every filter that already keys on a played game keeps working. Built
+    # from the two scores when they are present, since a frame assembled for a
+    # margin test may carry neither them nor nflverse's own total.
+    if {"home_score", "away_score"} <= set(df.columns):
+        df["y_total"] = (pd.to_numeric(df["home_score"], errors="coerce")
+                         + pd.to_numeric(df["away_score"], errors="coerce"))
+    elif "total" in df.columns:
+        df["y_total"] = pd.to_numeric(df["total"], errors="coerce")
+    else:
+        df["y_total"] = np.nan
     return df

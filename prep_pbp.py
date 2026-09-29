@@ -29,7 +29,56 @@ import pandas as pd
 
 PBP_URL = "https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{}.parquet"
 COLS = ["game_id", "season_type", "posteam", "defteam",
-        "epa", "pass", "rush", "cpoe", "wp"]
+        "epa", "pass", "rush", "cpoe", "wp",
+        "fixed_drive", "posteam_score", "posteam_score_post"]
+
+# Columns every consumer expects. A cache written before pace was added has the
+# EPA columns and none of these, and the short-circuit in build_team_game_stats
+# would hand it back forever, which is the same trap that froze EPA at 2025
+# week 18. So the short-circuit checks the schema, not just the file.
+STAT_COLS = ["off_epa_pass", "off_epa_rush", "cpoe", "def_epa_pass", "def_epa_rush",
+             "off_plays", "off_drives", "off_points",
+             "def_plays", "def_drives", "def_points"]
+
+
+def season_pace(pbp):
+    """Per team-game plays, drives and points, from both sides of the ball.
+
+    Drives and points come from `fixed_drive`, nflverse's cleaned drive numbering,
+    and from the possessing team's own score across the drive: last
+    posteam_score_post minus first posteam_score. Taking the offense's own score
+    rather than the game total is what keeps a pick six off the offense's ledger,
+    since a defensive score moves defteam_score and leaves posteam_score alone.
+    Extra points and two point tries sit inside the scoring drive, so they are
+    counted with it.
+
+    Plays are scrimmage plays, pass or rush, the same universe the EPA columns
+    aggregate over, but without the EPA-present and win-probability filters: pace
+    is a count of snaps taken and should not move because a play was garbage time
+    or had no EPA attached.
+
+    The def_ columns are the same three quantities conceded, aggregated over the
+    plays and drives where the team was on defense, so a team-game row carries
+    both what it did and what it allowed.
+    """
+    have = pbp[pbp["posteam"].notna() & pbp["defteam"].notna()]
+    scrim = have[(have["pass"] == 1) | (have["rush"] == 1)]
+    plays_off = scrim.groupby(["game_id", "posteam"]).size().rename("off_plays")
+    plays_def = scrim.groupby(["game_id", "defteam"]).size().rename("def_plays")
+
+    dr = have[have["fixed_drive"].notna()]
+    per_drive = dr.groupby(["game_id", "posteam", "defteam", "fixed_drive"]).agg(
+        start=("posteam_score", "first"), end=("posteam_score_post", "last"))
+    per_drive["pts"] = (per_drive["end"] - per_drive["start"]).clip(lower=0)
+    per_drive = per_drive.reset_index()
+    off = per_drive.groupby(["game_id", "posteam"]).agg(
+        off_drives=("fixed_drive", "size"), off_points=("pts", "sum"))
+    deff = per_drive.groupby(["game_id", "defteam"]).agg(
+        def_drives=("fixed_drive", "size"), def_points=("pts", "sum"))
+
+    o = off.join(plays_off).reset_index().rename(columns={"posteam": "team"})
+    d = deff.join(plays_def).reset_index().rename(columns={"defteam": "team"})
+    return o.merge(d, on=["game_id", "team"], how="outer")
 
 
 def download_season(season, pbp_dir="pbp_cache", force=False):
@@ -82,7 +131,9 @@ def season_team_game_stats(season, pbp_dir="pbp_cache", wp_filter=None,
             "def_epa_rush": g.loc[g["rush"] == 1, "epa"].mean(),
         }), include_groups=False).reset_index().rename(columns={"defteam": "team"})
 
-    return off.merge(deff, on=["game_id", "team"], how="outer").fillna(0.0)
+    epa = off.merge(deff, on=["game_id", "team"], how="outer")
+    return epa.merge(season_pace(pbp), on=["game_id", "team"],
+                     how="left").fillna(0.0)
 
 
 def build_team_game_stats(first_season=2010, last_season=None,
@@ -99,7 +150,11 @@ def build_team_game_stats(first_season=2010, last_season=None,
     if last_season is None:
         last_season = date.today().year
     if os.path.exists(cache_path):
-        return pd.read_csv(cache_path)
+        cached = pd.read_csv(cache_path)
+        missing = [c for c in STAT_COLS if c not in cached.columns]
+        if not missing:
+            return cached
+        print(f"{cache_path} predates {', '.join(missing)}; rebuilding")
     frames = []
     for season in range(first_season, last_season + 1):
         got = season_team_game_stats(season, pbp_dir, wp_filter)
