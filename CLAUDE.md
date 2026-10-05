@@ -202,6 +202,16 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
   The moneyline column prints American odds **and** the model's probability in
   brackets, because an earlier version printed the payout alone in the position
   where the other columns print confidence, and a 12% price reads as a 12% belief.
+  `--markdown` emits the same tables for a GitHub job summary, which is what the
+  "Weekly pick report" workflow runs: Actions tab, Run workflow, blank boxes for
+  the latest finished week or a week number to re-grade an old one. That workflow
+  is read only on purpose. It refreshes games.csv and the EPA file in the runner's
+  own working copy so the grade uses current results and then throws the copy
+  away; committing data belongs to the site rebuild, and two workflows pushing the
+  same files would race for the branch every Tuesday. Its numbers agree with the
+  Track Record's weekly table because both settle by the same rules, which is a
+  useful cross-check on two separate code paths: week 1 2026 reads -25.1% ML and
+  -61.8% on printed spread picks in both.
 - `run_v2.py` / `run_deliverable2.py`: reproduction scripts for the model
   comparison tables (2024 validation, 2025 test).
 

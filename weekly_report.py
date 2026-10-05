@@ -20,6 +20,10 @@ this as the record of the rules, not as a Kalshi statement.
 
     python weekly_report.py                 the latest week with results
     python weekly_report.py --week 4
+    python weekly_report.py --markdown      for a GitHub job summary
+
+Or from the Actions tab: "Weekly pick report", Run workflow. That path writes the
+same tables into the run summary, so nobody has to read a log to find them.
 """
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -50,7 +54,17 @@ def settle(won, push, dec):
     return (dec - 1.0 if won else -1.0), 1
 
 
-def grade(season, week, games_path="games.csv", stats_path="team_game_stats.csv"):
+def md_table(headers, rows):
+    """A GitHub-flavoured markdown table. Hand-rolled to avoid a tabulate dep."""
+    out = ["| " + " | ".join(headers) + " |",
+           "|" + "|".join("---" for _ in headers) + "|"]
+    for r in rows:
+        out.append("| " + " | ".join(str(c) for c in r) + " |")
+    return "\n".join(out)
+
+
+def grade(season, week, games_path="games.csv", stats_path="team_game_stats.csv",
+          markdown=False):
     df = rd.build_frame(games_path, stats_path)
     done = df[df["result"].notna()]
     if week is None:
@@ -162,27 +176,44 @@ def grade(season, week, games_path="games.csv", stats_path="team_game_stats.csv"
                   f"model {(p_home if fav_home else 1 - p_home)*100:.0f}%]",
             "spread": sp_txt, "ou": ou_txt})
 
-    print(f"\n=== {season} week {week}: {len(m)} games graded "
-          f"(walk-forward, refit on games before the week)\n")
-    w = pd.DataFrame(lines)
-    print(w.to_string(index=False))
-
-    print(f"\n{'ledger':<28}{'record':>14}{'ROI':>9}")
-    label = {"ml": "Every ML pick", "ml_value": "  of those, value picks",
-             "sp": "Every spread pick", "sp_printed": "  of those, the card printed",
-             "ou": "Every O/U pick", "ou_printed": "  of those, the card printed"}
-    out = {}
+    label = {"ml": "Every ML pick", "ml_value": "of those, value picks",
+             "sp": "Every spread pick", "sp_printed": "of those, the card printed",
+             "ou": "Every O/U pick", "ou_printed": "of those, the card printed"}
+    out, ledger = {}, []
     for key, lab in label.items():
         b = books[key]
         if not b["staked"]:
-            print(f"{lab:<28}{'none':>14}{'':>9}")
+            ledger.append((lab, "none", ""))
             continue
         roi = 100 * b["profit"] / b["staked"]
         dead = f" +{b['dead']}v" if b["dead"] else ""
-        print(f"{lab:<28}{f'{b[chr(119)]}-{b[chr(108)]}{dead}':>14}{roi:>+8.1f}%")
+        ledger.append((lab, f"{b['w']}-{b['l']}{dead}", f"{roi:+.1f}%"))
         out[key] = {"w": b["w"], "l": b["l"], "roi": roi}
-    print("\n52.4% is break even at -110. One week is a handful of bets: a swing "
-          "of plus or minus 40% here is noise, not a trend.")
+
+    caveat = ("52.4% is break even at -110. One week is a handful of bets: a swing "
+              "of plus or minus 40% here is noise, not a trend. Every number is "
+              "walk-forward, so the models were refit on games strictly before "
+              "this week and never saw its results.")
+    head = (f"{season} week {week}: {len(m)} games graded")
+    w = pd.DataFrame(lines)
+
+    if markdown:
+        print(f"## {head}\n")
+        print(md_table(["Ledger", "Record", "ROI"], ledger))
+        print(f"\n{caveat}\n")
+        print("### Game by game\n")
+        print(md_table(["Game", "Final", "Model", "Moneyline", "Spread",
+                        "Over/under"],
+                       [[r["game"], r["final"], r["model"], r["ml"], r["spread"],
+                         r["ou"]] for r in lines]))
+    else:
+        print(f"\n=== {head} (walk-forward, refit on games before the week)\n")
+        print(w.to_string(index=False))
+        print(f"\n{'ledger':<28}{'record':>14}{'ROI':>9}")
+        for lab, rec, roi in ledger:
+            print(f"{('  ' if lab.startswith('of those') else '') + lab:<28}"
+                  f"{rec:>14}{roi:>9}")
+        print(f"\n{caveat}")
     return out
 
 
@@ -192,12 +223,14 @@ def main():
     ap.add_argument("--week", type=int, default=None)
     ap.add_argument("--games", default="games.csv")
     ap.add_argument("--stats", default="team_game_stats.csv")
+    ap.add_argument("--markdown", action="store_true",
+                    help="emit markdown, for a GitHub Actions job summary")
     args = ap.parse_args()
     season = args.season
     if season is None:
         g = pd.read_csv(args.games, usecols=["season", "result"], low_memory=False)
         season = int(g[g["result"].notna()]["season"].max())
-    grade(season, args.week, args.games, args.stats)
+    grade(season, args.week, args.games, args.stats, args.markdown)
 
 
 if __name__ == "__main__":

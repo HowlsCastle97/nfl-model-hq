@@ -1,0 +1,122 @@
+# Grade a finished week's picks, from the Actions tab.
+#
+# Actions -> "Weekly pick report" -> Run workflow. Leave the boxes blank for the
+# latest week that has results, or type a week number to re-grade an old one.
+# The tables are written into the run summary, so you read them on the page
+# rather than scrolling a log.
+#
+# Read only. This job commits nothing: it refreshes games.csv and the EPA file in
+# the runner's own working copy so the grade uses current results, then throws
+# that copy away. Committing data is the weekly-site job's business, and having
+# two workflows push the same files would mean two jobs racing for the same
+# branch every Tuesday.
+#
+# It never touches kalshi_prices.db. No prices are needed to grade a finished
+# week: moneylines settle at the closing Vegas price out of games.csv and spreads
+# and totals at -110, the same rules the Track Record tab uses.
+#
+# Cost note: the margin model refits once per week of the season, so this is a
+# few minutes of CPU on a 2 core runner. That is why it is dispatch plus one
+# weekly cron rather than something that runs on every push.
+
+name: Weekly pick report
+
+on:
+  schedule:
+    # Tuesday 13:00 UTC, an hour after the site rebuild, by which time Monday
+    # night is final and the week being graded is actually complete.
+    - cron: "0 13 * * 2"
+  workflow_dispatch:
+    inputs:
+      week:
+        description: "Week to grade; blank means the latest week with results"
+        required: false
+        default: ""
+      season:
+        description: "Season; blank means the latest season with results"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WEEK: ${{ github.event.inputs.week || '' }}
+      SEASON: ${{ github.event.inputs.season || '' }}
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements.txt
+
+      - name: Refresh games.csv from nflverse (not committed)
+        run: |
+          curl -sSfL --retry 3 --retry-delay 5 \
+            https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv \
+            -o games.new.csv
+          python - <<'PY'
+          import pandas as pd, sys
+          df = pd.read_csv("games.new.csv", low_memory=False)
+          need = {"game_id", "season", "week", "result", "spread_line",
+                  "total_line", "home_moneyline", "away_moneyline",
+                  "home_score", "away_score"}
+          missing = need - set(df.columns)
+          if missing:
+              sys.exit(f"games.csv is missing columns: {sorted(missing)}")
+          if len(df) < 7000:
+              sys.exit(f"games.csv looks truncated: {len(df)} rows")
+          print(f"games.csv ok: {len(df)} rows through season {df.season.max()}")
+          PY
+          mv games.new.csv games.csv
+
+      - name: Refresh EPA inputs for the season in progress (not committed)
+        # Not fatal. Grading on EPA that is a week stale changes the predictions
+        # slightly; refusing to report at all because nflverse is slow does not
+        # help anybody.
+        continue-on-error: true
+        run: python prep_pbp.py --refresh-latest
+
+      - name: Grade the week
+        run: |
+          python weekly_report.py --markdown \
+            ${WEEK:+--week "$WEEK"} \
+            ${SEASON:+--season "$SEASON"} \
+            | tee report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-report
+          path: report.md
+          retention-days: 90
+
+      - name: Guard against committing anything
+        run: |
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::notice::Working tree changed (refreshed data). Nothing is committed by design."
+          fi
+          if git ls-files | grep -E '\.db$'; then
+            echo "::error::A .db file is tracked by git."
+            exit 1
+          fi
