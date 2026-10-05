@@ -195,6 +195,13 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
   the EPA columns at what the play cost, so a separate turnover input would count
   it twice. `prep_pbp` carries `giveaways` and `takeaways` per team-game and
   `interceptions` plus `passer` per quarterback-game for exactly this display.
+- `weekly_report.py`: grades one week's published picks game by game, walk-forward,
+  so it reproduces what the cards said rather than refitting with the answers
+  known. Six ledgers, the same unfiltered/filtered pairs as the Track Record plus
+  over/unders. `python weekly_report.py` takes the latest week with results.
+  The moneyline column prints American odds **and** the model's probability in
+  brackets, because an earlier version printed the payout alone in the position
+  where the other columns print confidence, and a 12% price reads as a 12% belief.
 - `run_v2.py` / `run_deliverable2.py`: reproduction scripts for the model
   comparison tables (2024 validation, 2025 test).
 
@@ -269,7 +276,14 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
    --refresh-latest` and `--qb`, run `python website.py --out docs/index.html`,
    commit and push (Pages redeploys automatically). Then
    `python weekly_report.py` for the week just finished.
-
+   The page header carries three separate facts and they are not interchangeable:
+   when the page was built, when `games.csv` was last written (its mtime, which is
+   the pull time in the normal flow but becomes checkout time if a build runs
+   without refreshing), and how far the results actually run, taken from the data
+   itself. The third is the one that cannot lie, which is why it is there. Both
+   timestamps are published as instants with `data-stamp` and localised to the
+   reader's clock by `localiseStamps`, with Eastern text as the no-script
+   fallback, the same pattern the kickoff times use.
 
 ## Current task list
 
@@ -344,6 +358,28 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
    once real KXNFLSPREAD rows accumulate and compute spread edges against real
    prices (currently graded against Vegas line at -110); backtest engine over
    logged prices; fractional Kelly sizing.
+
+## Week by week results
+
+2026 week 4, graded 2026-10-05 on 15 games (ATL at NO still to play), walk-forward:
+
+| ledger | record | ROI |
+|---|---|---|
+| every ML pick | 11-4 | +14.2% |
+| of those, value picks | 4-1 | +50.1% |
+| every spread pick | 9-4, 2 pushes | +32.2% |
+| of those, the card printed | 5-0 | +90.9% |
+| every O/U pick | 4-11 | -49.1% |
+| of those, the card printed | 2-3 | -23.6% |
+
+Fifteen bets a ledger, so none of this is a trend. Two things are worth watching
+rather than acting on. The spread filter went 5-0, which is the third separate
+piece of evidence that `SPREAD_REC_P` earns its place. And the totals model's two
+most confident picks were its two biggest misses: GB at TB printed at 72% (model
+46.1, actual 31) and KC at LV at 66% (model 42.1, actual 57). Confidence running
+backwards on a model with no measured edge is the thing to watch. If that holds for
+another two or three weeks, stop printing O/U picks and leave the row as
+information, which is a copy change and not a model change.
 
 ## The deployed margin model is on probation
 
