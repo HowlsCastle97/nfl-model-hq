@@ -211,6 +211,64 @@ ok("psmall" not in tot_row, "the model total is still small print")
 ok("sprow" not in hc or "Model total" not in hc.split('class="gap sprow"')[1],
    "the old small grey totals line is still on the card")
 
+# --- the over/under gets a reason too, and its arithmetic has to actually close ---
+import totals as T
+
+TC = T.TOTAL_COLS
+def tot_row(**kw):
+    x = np.array([21.0, 21.5, 10.5, 10.8, 3.9, 3.8, 0.30, -0.15, 0.05, -0.20,
+                  2.0, 44.0, 14.0, 0.0], dtype=float)
+    mean = np.array([23.2, 23.2, 11.6, 11.6, 3.76, 3.75, 0.13, -0.21, 0.13,
+                     -0.21, 0.6, 62.0, 6.0, 0.28], dtype=float)
+    # A contribution vector that sums to a known number, so the closing claim in
+    # the copy can be checked rather than taken on faith.
+    c = np.array([-1.2, -0.8, 0.1, 0.1, 0.9, 0.4, 1.1, 0.2, -0.3, -0.1,
+                  0.05, 0.1, -0.6, -0.0], dtype=float)
+    r = dict(home="BUF", away="NE", tot_x=x, tot_c=c, tot_mean=mean,
+             tot_base=45.3, tot_sigma=13.3, total_line=48.5,
+             lev={"off_drives_home": 10.5, "off_drives_away": 10.8,
+                  "off_points_home": 24.0, "off_points_away": 20.0})
+    r["tot_mu"] = 45.3 + c.sum()
+    r.update(kw)
+    return r
+
+tr = T.__name__ and W.totals_reason(tot_row())
+flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", tr)).strip()
+print("totals reason:", flat[:210])
+ok(tr, "no reasoning produced for the total")
+ok("45.3" in tr, "the average game's total is not stated")
+ok(f"{45.3 + tot_row()['tot_c'].sum():.1f}" in tr, "the model's own total is missing")
+ok("48.5" in tr, "the market total is missing")
+
+# The claim that separates this panel from the margin one: the parts add up.
+r = tot_row()
+ok(abs(r["tot_base"] + r["tot_c"].sum() - r["tot_mu"]) < 1e-9,
+   "the fixture itself does not add up")
+ok("do add up" in tr, "the panel does not make its additive claim")
+
+# Named teams and their own pace, not just the pair.
+ok("BUF" in tr and "NE" in tr, f"neither team is named: {flat[:120]}")
+
+# Negative zero is a claim about direction the number cannot support.
+ok("-0.00" not in flat and "-0.0 " not in flat, f"negative zero in the prose: {flat}")
+
+# Weather is described when it is outside, and the roof when it is not.
+windy = re.sub(r"<[^>]+>", " ", W.totals_reason(tot_row()))
+ok("mph" in windy, f"a 14 mph outdoor game says nothing about wind: {windy[:200]}")
+indoor_x = tot_row()["tot_x"].copy()
+indoor_x[TC.index("indoor")] = 1.0
+indoor_x[TC.index("game_wind")] = 0.0
+ind = re.sub(r"<[^>]+>", " ", W.totals_reason(tot_row(tot_x=indoor_x)))
+ok("roof is closed" in ind, f"a dome game does not mention the roof: {ind[:200]}")
+
+# And a card with no totals model gets no totals panel rather than a broken one.
+ok(W.totals_reason({"home": "BUF", "away": "NE"}) == "",
+   "a card without a totals prediction produced a reason anyway")
+ok("Why that total" in card(tot_mu=45.2, tot_sigma=13.3, total_line=48.5,
+                            tot_x=tot_row()["tot_x"], tot_c=tot_row()["tot_c"],
+                            tot_base=45.3, tot_mean=tot_row()["tot_mean"]),
+   "the totals reason never reached the card")
+
 print("\n" + ("FAIL:\n - " + "\n - ".join(fail) if fail else "PASS: rebuilt card"))
 
 sys.exit(1 if fail else 0)

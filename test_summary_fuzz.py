@@ -62,7 +62,12 @@ for _ in range(TRIALS):
     ok(": ." not in t and ":." not in t, f"empty clause: {ctx}")
     ok("None" not in t, f"a None leaked into the prose: {ctx}")
     ok("-0.0" not in t, f"negative zero: {ctx}")
-    ok(not re.search(r"\b0\.0 points?\b", t), f"claims a zero-point effect: {ctx}")
+    # A claimed effect of zero is the bug this catches. A measured rate of zero is
+    # not: a team really can be averaging +0.0 points a game, and printing that is
+    # a fact, so the pattern targets the two constructions the prose uses to
+    # assert an effect rather than any appearance of the digits.
+    ok(not re.search(r"\babout 0\.0 points?\b|\b0\.0 points? of it\b", t),
+       f"claims a zero-point effect: {ctx}")
     ok(not re.search(r"\bCIN CIN\b|\bTB TB\b", t), f"team repeated: {ctx}")
 
     # Plural must follow the number printed beside it.
@@ -84,8 +89,10 @@ for _ in range(TRIALS):
     ok(" do not" not in t, f"asserts a team lacks its starter: {ctx}")
 
     for key, phrase in (("ground", "On the ground"), ("air", "Through the air"),
-                        ("class", "the better side"), ("qb", "has seen more of"),
-                        ("spot", "Situationally"), ("form", "outscor")):
+                        ("class", "the better team rating"),
+                        ("qb", "has seen more of"),
+                        ("spot", "Situationally"),
+                        ("form", "outscor"), ("form", "Recent scoring")):
         if phrase in t:
             seen_themes.add(key)
 

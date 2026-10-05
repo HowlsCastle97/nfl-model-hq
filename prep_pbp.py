@@ -30,7 +30,8 @@ import pandas as pd
 PBP_URL = "https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{}.parquet"
 COLS = ["game_id", "season_type", "posteam", "defteam",
         "epa", "pass", "rush", "cpoe", "wp",
-        "fixed_drive", "posteam_score", "posteam_score_post"]
+        "fixed_drive", "posteam_score", "posteam_score_post",
+        "interception", "fumble_lost"]
 
 # Columns every consumer expects. A cache written before pace was added has the
 # EPA columns and none of these, and the short-circuit in build_team_game_stats
@@ -38,7 +39,8 @@ COLS = ["game_id", "season_type", "posteam", "defteam",
 # week 18. So the short-circuit checks the schema, not just the file.
 STAT_COLS = ["off_epa_pass", "off_epa_rush", "cpoe", "def_epa_pass", "def_epa_rush",
              "off_plays", "off_drives", "off_points",
-             "def_plays", "def_drives", "def_points"]
+             "def_plays", "def_drives", "def_points",
+             "giveaways", "takeaways"]
 
 
 def season_pace(pbp):
@@ -76,8 +78,18 @@ def season_pace(pbp):
     deff = per_drive.groupby(["game_id", "defteam"]).agg(
         def_drives=("fixed_drive", "size"), def_points=("pts", "sum"))
 
-    o = off.join(plays_off).reset_index().rename(columns={"posteam": "team"})
-    d = deff.join(plays_def).reset_index().rename(columns={"defteam": "team"})
+    # Turnovers, counted on both sides of the ball. These are for the site to
+    # quote, not for the model: EPA already charges an interception at the value
+    # of the play, and adding a separate turnover input would count it twice. The
+    # site says that in as many words next to the numbers.
+    tos = have.assign(_to=have["interception"].fillna(0) + have["fumble_lost"].fillna(0))
+    give = tos.groupby(["game_id", "posteam"])["_to"].sum().rename("giveaways")
+    take = tos.groupby(["game_id", "defteam"])["_to"].sum().rename("takeaways")
+
+    o = off.join(plays_off).join(give).reset_index().rename(
+        columns={"posteam": "team"})
+    d = deff.join(plays_def).join(take).reset_index().rename(
+        columns={"defteam": "team"})
     return o.merge(d, on=["game_id", "team"], how="outer")
 
 
@@ -216,7 +228,8 @@ def refresh(season, cache_path="team_game_stats.csv", pbp_dir="pbp_cache",
     return len(fresh)
 
 
-QB_COLS = ["game_id", "season_type", "qb_dropback", "passer_id", "posteam", "qb_epa"]
+QB_COLS = ["game_id", "season_type", "qb_dropback", "passer_id", "passer",
+           "posteam", "qb_epa", "interception"]
 
 
 def build_qb_game_stats(first_season=2010, last_season=None,
@@ -230,6 +243,10 @@ def build_qb_game_stats(first_season=2010, last_season=None,
 
     qb_epa rather than epa: it does not charge the quarterback for a receiver's
     fumble after the catch. The two differ on about 0.3% of dropbacks.
+
+    Interceptions and the passer's name ride along for the site to quote. Neither
+    is a model input: an interception is already inside qb_epa and inside the team
+    EPA columns, priced at what the play actually cost.
 
     Regular season only, matching team_game_stats and the schedule the model
     predicts. Always a full rebuild: the whole file is small and the rating is
@@ -247,9 +264,11 @@ def build_qb_game_stats(first_season=2010, last_season=None,
               & p["passer_id"].notna() & p["qb_epa"].notna()]
         if p.empty:
             continue
-        g = (p.groupby(["game_id", "posteam", "passer_id"])["qb_epa"]
-             .agg(dropbacks="size", qb_epa="sum").reset_index()
-             .rename(columns={"posteam": "team"}))
+        g = (p.groupby(["game_id", "posteam", "passer_id"])
+             .agg(dropbacks=("qb_epa", "size"), qb_epa=("qb_epa", "sum"),
+                  interceptions=("interception", "sum"),
+                  passer=("passer", "first"))
+             .reset_index().rename(columns={"posteam": "team"}))
         frames.append(g)
         print(f"{season}: {len(g)} quarterback-games")
     out = pd.concat(frames, ignore_index=True)

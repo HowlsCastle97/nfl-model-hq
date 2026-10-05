@@ -286,6 +286,16 @@ def build_features(df, stats_lookup=None, form_half_life_games=8, rest_clip=(3, 
         df["def_pass_diff"] = epa_sides["def_epa_pass"][0] - epa_sides["def_epa_pass"][1]
         df["def_rush_diff"] = epa_sides["def_epa_rush"][0] - epa_sides["def_epa_rush"][1]
         df["cpoe_diff"] = epa_sides["cpoe"][0] - epa_sides["cpoe"][1]
+        # Each side's own level as well as the gap. Not model inputs: the model
+        # sees the differences, and these exist so the site can say "+0.30 against
+        # -0.09" instead of "the better passing team", which is the same claim
+        # with the evidence removed.
+        for stat in EPA_STATS:
+            df[f"{stat}_home"] = epa_sides[stat][0]
+            df[f"{stat}_away"] = epa_sides[stat][1]
+        for stat in PACE_STATS:
+            df[f"{stat}_home"] = pace_sides[stat][0]
+            df[f"{stat}_away"] = pace_sides[stat][1]
         # The same states added instead of subtracted. Nothing here is a model
         # input for margin; these exist for the totals model.
         df["off_pass_sum"] = epa_sides["off_epa_pass"][0] + epa_sides["off_epa_pass"][1]

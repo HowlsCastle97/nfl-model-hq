@@ -1,5 +1,6 @@
 import argparse
 import itertools
+import os
 from collections import Counter
 from zoneinfo import ZoneInfo
 import numpy as np
@@ -8,7 +9,7 @@ from scipy.stats import norm
 
 import rundown as rd
 import totals as tot
-from features import FEATURE_COLS
+from features import EPA_STATS, FEATURE_COLS, PACE_STATS
 from models import prob_total_over
 from walkforward import walk_forward
 
@@ -390,6 +391,183 @@ def ou_rows(r):
             f'<span class="lpct">hits <b>{p*100:.0f}%</b> of the time{tag}{push}'
             f'</span></div>')
     return pred, pick
+
+
+# Which totals inputs belong together in one sentence, and how to say each one.
+TOTAL_THEMES = (
+    ("possessions", ("drives_sum", "drives_allowed_sum", "plays_sum",
+                     "plays_allowed_sum")),
+    ("scoring", ("off_ppd_sum", "def_ppd_sum")),
+    ("efficiency", ("off_pass_sum", "off_rush_sum", "def_pass_sum",
+                    "def_rush_sum", "cpoe_sum")),
+    ("conditions", ("game_wind", "game_temp", "indoor")),
+)
+
+TOTAL_LABELS = {
+    "drives_sum": "Drives, both offences",
+    "drives_allowed_sum": "Drives faced, both defences",
+    "plays_sum": "Snaps, both offences",
+    "plays_allowed_sum": "Snaps faced, both defences",
+    "off_ppd_sum": "Points per drive, both offences",
+    "def_ppd_sum": "Points per drive allowed",
+    "off_pass_sum": "Passing EPA, both offences",
+    "off_rush_sum": "Rushing EPA, both offences",
+    "def_pass_sum": "Passing EPA allowed",
+    "def_rush_sum": "Rushing EPA allowed",
+    "cpoe_sum": "CPOE, both offences",
+    "game_wind": "Wind",
+    "game_temp": "Temperature",
+    "indoor": "Roof",
+}
+
+
+def totals_reason(r):
+    """Why the totals model landed where it did, as a sum that actually adds up.
+
+    The margin panel has to warn that its parts do not sum to the whole, because
+    a network is not additive. This one does not: the deployed totals engine is a
+    weighted least squares fit, so the prediction is exactly the average game's
+    total plus one term per input. Every number below is that term, and the
+    sentence says so.
+
+    Each clause quotes this game's value against the league average the model
+    measured it from, because "the pace is slow" is a claim and "20.4 drives
+    against a league 23.2" is the evidence for it.
+    """
+    mu, sigma = r.get("tot_mu"), r.get("tot_sigma")
+    c = r.get("tot_c")
+    if mu is None or pd.isna(mu) or c is None or not len(c):
+        return ""
+    base = float(r.get("tot_base", mu))
+    vals = dict(zip(tot.TOTAL_COLS, r.get("tot_x", [])))
+    mean = dict(zip(tot.TOTAL_COLS, r.get("tot_mean", [])))
+    con = dict(zip(tot.TOTAL_COLS, c))
+    home, away = r["home"], r["away"]
+    lev = r.get("lev") or {}
+
+    def sgn(x, places=2):
+        v = float(x)
+        if abs(v) < 0.5 * 10 ** -places:
+            v = 0.0
+        return f"{v:+.{places}f}"
+
+    def num(fmt, key, side):
+        v = lev.get(f"{key}_{side}")
+        return None if v is None or (isinstance(v, float) and np.isnan(v)) else fmt.format(v)
+
+    def pace_pair(key, fmt="{:.1f}"):
+        a, b = num(fmt, key, "home"), num(fmt, key, "away")
+        return (a, b) if a and b else (None, None)
+
+    said = []
+    for name, keys in TOTAL_THEMES:
+        tot_pts = sum(con.get(k, 0.0) for k in keys)
+        if abs(tot_pts) < 0.25:
+            continue
+        way = "up" if tot_pts > 0 else "down"
+        pts = f"{abs(tot_pts):.1f}"
+        unit = "point" if pts == "1.0" else "points"
+        if name == "possessions":
+            h, a = pace_pair("off_drives")
+            both = vals.get("drives_sum", float("nan"))
+            who = (f"{home} have been averaging {h} drives a game and {away} {a}, "
+                   f"{both:.1f} between them" if h and a else
+                   f"these two combine for {both:.1f} drives")
+            said.append(f"Pace takes it <b>{way} {pts} {unit}</b>: {who}, against "
+                        f"a league {mean.get('drives_sum', 0):.1f}.")
+        elif name == "scoring":
+            hp = num("{:.1f}", "off_points", "home")
+            hd = num("{:.1f}", "off_drives", "home")
+            ap = num("{:.1f}", "off_points", "away")
+            ad = num("{:.1f}", "off_drives", "away")
+            if hp and hd and ap and ad:
+                hr = float(hp) / max(float(hd), 1e-6)
+                ar = float(ap) / max(float(ad), 1e-6)
+                who = (f"{home} are scoring {hr:.2f} points a drive and {away} "
+                       f"{ar:.2f}, {hr + ar:.2f} between them")
+            else:
+                who = (f"they combine for "
+                       f"{vals.get('off_ppd_sum', float('nan')):.2f} points a drive")
+            said.append(f"Scoring rate takes it <b>{way} {pts} {unit}</b>: {who}, "
+                        f"against a league {mean.get('off_ppd_sum', 0):.2f}.")
+        elif name == "efficiency":
+            bits = []
+            if abs(con.get("def_pass_sum", 0)) >= 0.2:
+                bits.append(f"the two pass defences concede "
+                            f"{sgn(vals.get('def_pass_sum', 0))} EPA a dropback "
+                            f"between them against {sgn(mean.get('def_pass_sum', 0))}")
+            if abs(con.get("off_pass_sum", 0)) >= 0.2:
+                bits.append(f"the two passing offences are at "
+                            f"{sgn(vals.get('off_pass_sum', 0))} against "
+                            f"{sgn(mean.get('off_pass_sum', 0))}")
+            if abs(con.get("def_rush_sum", 0)) >= 0.2:
+                bits.append(f"the run defences concede "
+                            f"{sgn(vals.get('def_rush_sum', 0))} against "
+                            f"{sgn(mean.get('def_rush_sum', 0))}")
+            body = "; ".join(bits) if bits else "the efficiency numbers lean that way"
+            said.append(f"Efficiency takes it <b>{way} {pts} {unit}</b>: {body}.")
+        else:
+            bits = []
+            if vals.get("indoor"):
+                bits.append(f"the roof is closed, so no wind and a steady "
+                            f"{vals.get('game_temp', 70):.0f} degrees where an "
+                            f"outdoor game would average "
+                            f"{mean.get('game_wind', 0):.0f} mph")
+            else:
+                if abs(con.get("game_wind", 0)) >= 0.15:
+                    bits.append(f"{vals.get('game_wind', 0):.0f} mph of wind "
+                                f"against a typical {mean.get('game_wind', 0):.0f}")
+                if abs(con.get("game_temp", 0)) >= 0.15:
+                    bits.append(f"{vals.get('game_temp', 0):.0f} degrees against a "
+                                f"typical {mean.get('game_temp', 0):.0f}")
+            body = "; ".join(bits) if bits else "the conditions"
+            said.append(f"Conditions take it <b>{way} {pts} {unit}</b>: {body}.")
+
+    line = r.get("total_line")
+    tail = ""
+    if line is not None and not pd.isna(line):
+        d = mu - float(line)
+        tail = (f" The market is at {float(line):g}, so the model is "
+                f"{abs(d):.1f} {'above' if d > 0 else 'below'} it.")
+    if not said:
+        said = ["Nothing about this matchup moves the total far from average."]
+
+    rows = []
+    for k, v in sorted(con.items(), key=lambda kv: -abs(kv[1])):
+        pull = ('<span class="rnil">no effect</span>' if abs(v) < 0.05 else
+                f'<span class="{"rhome" if v > 0 else "raway"}">{abs(v):.1f} '
+                f'{"up" if v > 0 else "down"}</span>')
+        shown = (f"{vals.get(k, 0):.0f}" if k in ("plays_sum", "plays_allowed_sum",
+                                                  "game_temp", "game_wind")
+                 else "indoors" if k == "indoor" and vals.get(k)
+                 else "outdoors" if k == "indoor"
+                 else sgn(vals.get(k, 0)) if k.endswith("_sum") and "pp" not in k
+                 else f"{vals.get(k, 0):.2f}")
+        rows.append(f'<tr><td class="rpull">{pull}</td>'
+                    f'<td class="rname">{TOTAL_LABELS.get(k, k)}'
+                    f'<span class="rval">{shown}</span></td>'
+                    f'<td class="rdesc">league {mean.get(k, 0):.2f}</td></tr>')
+
+    return (f'<p class="rlead" style="margin-top:14px"><b>Why that total.</b> An '
+            f'average matchup prices at {base:.1f} points. This one comes out at '
+            f'<b>{mu:.1f}</b> &plusmn;{sigma:.0f}.{tail}</p>'
+            f'<p class="rplain">{" ".join(said)}</p>'
+            f'<p class="rlead">The same thing as arithmetic. Unlike the margin '
+            f'table above, these do add up: {base:.1f} plus every line below is '
+            f'exactly {mu:.1f}, because the totals model is a weighted least '
+            f'squares fit and not a network.</p>'
+            f'<table class="rtab">{"".join(rows)}</table>')
+
+
+def stamp_text(ts):
+    """A UTC instant written out in US Eastern, as the text under the live clock.
+
+    The page's JS rewrites these on the reader's own clock, the same way kickoffs
+    are handled. This is what a reader sees with scripting off, so it carries its
+    zone explicitly rather than leaving a bare time to be guessed at.
+    """
+    et = ts.tz_convert(ZoneInfo("America/New_York"))
+    return et.strftime("%b %d, %Y at %I:%M %p ET").replace(" 0", " ")
 
 
 def rec_rows(frame, label_col, label_fmt=str):
@@ -898,7 +1076,19 @@ function localiseKickoffs(){
                                        timeZoneName: 'short'});
   });
 }
-function bootWeek(){ localiseKickoffs(); applyPrices(); }
+/* Same treatment for the header stamps: published as instants, rendered on the
+   reader's clock, and left exactly as the server wrote them if anything fails. */
+function localiseStamps(){
+  document.querySelectorAll('.stamp[data-stamp]').forEach(function(el){
+    var d = new Date(el.dataset.stamp);
+    if (isNaN(d.getTime())) return;
+    el.textContent =
+      d.toLocaleDateString([], {month: 'short', day: 'numeric', year: 'numeric'}) +
+      ' at ' + d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit',
+                                         timeZoneName: 'short'});
+  });
+}
+function bootWeek(){ localiseKickoffs(); localiseStamps(); applyPrices(); }
 if (document.readyState === 'loading'){
   document.addEventListener('DOMContentLoaded', bootWeek);
 } else { bootWeek(); }
@@ -1208,8 +1398,74 @@ def feature_value(col, v):
     return f"{v:+.2f}"
 
 
+def season_context(df, season, stats_path="team_game_stats.csv",
+                   qb_path="qb_game_stats.csv"):
+    """Plain season-to-date facts for the reasoning prose, per team and per passer.
+
+    None of this is a model input and the panel says so. It exists because "the
+    better side" is a claim with the evidence taken out, and a reader who can see
+    12 points a game against 34, or six interceptions against two, can judge the
+    model's read instead of taking it on faith.
+
+    Turnovers in particular are shown and not modelled. An interception is already
+    inside the EPA numbers the model does use, charged at what the play cost, so a
+    separate turnover input would count it twice. Quoting the count is honest;
+    feeding it in would not be.
+
+    Falls back to the previous season for a team with nothing played yet, flagged
+    so the prose can say which year it is describing.
+    """
+    played = df[(df["season"] == season) & df["result"].notna()]
+    use, past = season, False
+    if played.empty:
+        use, past = season - 1, True
+        played = df[(df["season"] == use) & df["result"].notna()]
+
+    teams = {}
+    for t in sorted(set(played["home_team"]) | set(played["away_team"])):
+        rows = played[(played["home_team"] == t) | (played["away_team"] == t)]
+        at_home = rows["home_team"] == t
+        margin = np.where(at_home, rows["result"], -rows["result"])
+        pf = np.where(at_home, rows["home_score"], rows["away_score"])
+        pa = np.where(at_home, rows["away_score"], rows["home_score"])
+        teams[t] = {"games": len(rows), "w": int((margin > 0).sum()),
+                    "l": int((margin < 0).sum()), "t": int((margin == 0).sum()),
+                    "pf": float(np.mean(pf)), "pa": float(np.mean(pa)),
+                    "margin": float(np.mean(margin)), "season": use, "past": past}
+
+    try:
+        st = pd.read_csv(stats_path)
+        st = st[st["game_id"].str.startswith(f"{use}_")]
+        if "giveaways" in st.columns:
+            agg = st.groupby("team")[["giveaways", "takeaways"]].sum()
+            for t, r in agg.iterrows():
+                if t in teams:
+                    teams[t]["giveaways"] = int(r["giveaways"])
+                    teams[t]["takeaways"] = int(r["takeaways"])
+    except Exception:
+        pass
+
+    qbs = {}
+    try:
+        q = pd.read_csv(qb_path)
+        q = q[q["game_id"].str.startswith(f"{use}_")]
+        if "interceptions" in q.columns:
+            for pid, r in q.groupby("passer_id").agg(
+                    dropbacks=("dropbacks", "sum"), qb_epa=("qb_epa", "sum"),
+                    ints=("interceptions", "sum"),
+                    name=("passer", "last")).iterrows():
+                if r["dropbacks"] >= 20:
+                    qbs[pid] = {"dropbacks": int(r["dropbacks"]),
+                                "epa_per": float(r["qb_epa"] / r["dropbacks"]),
+                                "ints": int(r["ints"]), "name": str(r["name"]),
+                                "season": use}
+    except Exception:
+        pass
+    return teams, qbs
+
+
 def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
-                  fam_h=None, fam_a=None):
+                  fam_h=None, fam_a=None, lev=None, ctx=None, qbx=None):
     """The same arithmetic as the table, told the way you would tell a friend.
 
     Two rules keep it honest.
@@ -1226,6 +1482,18 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
     mean he was hurt. It does NOT mean a backup is playing, and an earlier
     version of this text said exactly that about Joe Burrow, who started 7 of
     Cincinnati's last 16 after an injury and is very much their starter.
+
+    Every claim carries its number. This used to say things like "X were simply
+    the better side", which is an assertion with the evidence deleted: a reader
+    could not tell whether the model was looking at a two point edge or a ten
+    point one, nor check it against what they had watched. Now each clause quotes
+    the figure it rests on, per team rather than as a gap, and names the passer
+    where there is a passer to name.
+
+    lev holds each side's own EPA levels, ctx the season-to-date record and
+    turnovers, qbx the listed starters' own numbers. All three are optional: with
+    none of them the prose degrades to the shape it had before rather than
+    failing, which is what the card tests without a full frame rely on.
     """
     g = dict(zip(rd.V3_COLS, con))
     v = dict(zip(rd.V3_COLS, vals))
@@ -1244,6 +1512,88 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
     def who(x):
         return (home, away) if x > 0 else (away, home)
 
+    lev = lev or {}
+    ctx = ctx or {}
+    qbx = qbx or {}
+    # Tense follows the evidence, the same rule the older clauses kept by hand.
+    # In week 1 every number here is last season's and the prose has to say so in
+    # the verb as well as in the era, or it describes a season that has not
+    # happened in the present tense.
+    IS = "was" if past else "is"
+    ARE = "were" if past else "are"
+    HAS = "had" if past else "has"
+
+    def side_of(team, stat):
+        """One team's own level of an EPA stat, or None if the frame lacks it."""
+        key = f"{stat}_{'home' if team == home else 'away'}"
+        v = lev.get(key)
+        return None if v is None or (isinstance(v, float) and np.isnan(v)) else float(v)
+
+    def pair(team, opp, stat, fmt="{:+.2f}", unit="", floor=0.03):
+        """"+0.30 against -0.09" for the two sides of one stat, team first.
+
+        Returns nothing when the two sides are within `floor` of each other. A
+        sentence calling one defence "the leakier" off +0.01 against -0.01 is
+        technically true and rhetorically false, and the reader cannot tell which
+        without the numbers, which is the whole reason the numbers are here.
+        """
+        a, b = side_of(team, stat), side_of(opp, stat)
+        if a is None or b is None or abs(a - b) < floor:
+            return ""
+        return f"{fmt.format(a)}{unit} against {fmt.format(b)}{unit}"
+
+    # How much of the efficiency read is still last season. The EWMA half-life is
+    # eight games, so after n games this much weight remains on what came before.
+    carry = 0.5 ** (played / 8.0) if played else 1.0
+
+    # Whether this card was given the per side levels at all. It matters because
+    # an empty `pair` means two different things: no numbers to quote, in which
+    # case the older vague wording is the best available, or numbers that are too
+    # close to be worth a sentence, in which case the sentence should not exist.
+    has_lev = any(side_of(home, st) is not None for st in EPA_STATS)
+
+    def qb_gap():
+        """This season's gap between the two listed starters, per dropback."""
+        a = qbx.get(qbx.get("id_home"))
+        b = qbx.get(qbx.get("id_away"))
+        if not a or not b:
+            return None
+        return a["epa_per"] - b["epa_per"]
+
+    def record(team):
+        c = ctx.get(team)
+        if not c or not c.get("games"):
+            return ""
+        wl = f"{c['w']}-{c['l']}" + (f"-{c['t']}" if c.get("t") else "")
+        return (f"{wl}, scoring {c['pf']:.0f} a game and allowing {c['pa']:.0f}")
+
+    def giveaway_clause(team, opp):
+        a, b = ctx.get(team, {}), ctx.get(opp, {})
+        if "giveaways" not in a or "giveaways" not in b:
+            return ""
+        # Symmetric and countable, and silent when the two are level: "2 to 2"
+        # is not a fact worth a sentence.
+        if a["giveaways"] == b["giveaways"]:
+            return ""
+        have = "had" if past else "have"
+        return (f"{team} {have} {a['giveaways']} giveaways {era} to "
+                f"{opp}'s {b['giveaways']}")
+
+    def qb_clause(team):
+        """The listed starter's own production, named, or an empty string."""
+        pid = qbx.get("id_home" if team == home else "id_away")
+        rec = qbx.get(pid) if pid else None
+        if not rec:
+            return ""
+        ints = (f", {rec['ints']} interception" + ("s" if rec["ints"] != 1 else "")
+                if rec.get("ints") is not None else "")
+        # A quarterback sitting a thousandth below zero is at zero, and "-0.00"
+        # reads as a direction the number does not support.
+        per = rec["epa_per"]
+        per = 0.0 if abs(per) < 0.005 else per
+        return (f"{rec['name']} {IS} at {per:+.2f} expected points per "
+                f"dropback over {rec['dropbacks']} of them{ints}")
+
     out = []
     for name, tot in sorted(themes.items(), key=lambda kv: -abs(kv[1])):
         if abs(tot) < 0.3 or len(out) >= 3:
@@ -1255,42 +1605,99 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
         shown = f"{abs(tot):.1f}"
         pts = f"about {shown} {'point' if shown == '1.0' else 'points'}"
         if name == "class":
-            were = "were" if past else "have been"
-            out.append(f"<b>{t}</b> {were} simply the better side {era}, worth "
-                       f"{pts} here before anything else about the matchup.")
+            gap = abs(v["kalman_diff"])
+            recs = [x for x in (record(t), record(opp)) if x]
+            if len(recs) == 2:
+                body = f"{t} {ARE} {recs[0]}; {opp} {ARE} {recs[1]}"
+            else:
+                body = (f"the ratings separate them by {gap:.1f} points on a "
+                        f"neutral field")
+            give = giveaway_clause(t, opp)
+            tail = f". {give[0].upper()}{give[1:]}." if give else "."
+            # Not `carry`: that name already holds how much of the read is last
+            # season's, and shadowing it turned a number into a verb.
+            carry_v = "carried" if past else "carry"
+            # A rating gap that rounds to nothing is not "0.0 points of it", it is
+            # two teams the filter cannot separate, and the sentence has to say
+            # the second thing.
+            held = (f"{gap:.1f} points of it on a neutral field and {pts} once "
+                    f"the filter's uncertainty is taken into account"
+                    if gap >= 0.05 else
+                    f"worth {pts} here, almost all of it the filter's uncertainty "
+                    f"rather than the ratings, which have them level")
+            out.append(f"<b>{t}</b> {carry_v} the better team rating {era}, "
+                       f"{held}: {body}{tail}")
         elif name == "air":
             bits = []
             if (v["off_pass_diff"] > 0) == (t == home) and v["off_pass_diff"]:
-                mover = qb.get(t)
-                verb = "were" if past else "have been"
-                bits.append((f"{mover} and the {t} pass game {verb} the more "
-                             f"efficient of the two per dropback") if mover else
-                            f"they {verb} the more efficient passing team")
+                num = pair(t, opp, "off_epa_pass")
+                if num:
+                    bits.append(f"{t}'s passing offence {IS} at {num} expected "
+                                f"points per dropback {era}")
+                elif not has_lev:
+                    bits.append(f"{t} {ARE} the more efficient passing team {era}")
             if (v["def_pass_diff"] > 0) == (opp == home) and v["def_pass_diff"]:
-                verb = "was" if past else "has been"
-                bits.append(f"the {opp} pass defence {verb} the leakier one, "
-                            f"giving up more per throw")
+                num = pair(opp, t, "def_epa_pass")
+                if num:
+                    bits.append(f"the {opp} pass defence {IS} the leakier, "
+                                f"conceding {num} per throw")
+                elif not has_lev:
+                    bits.append(f"the {opp} pass defence {IS} the leakier of the two")
             if (v["cpoe_diff"] > 0) == (t == home) and v["cpoe_diff"]:
-                mover = qb.get(t)
-                verb = "completed" if past else "has been completing"
-                bits.append((f"{mover} {verb} throws he had no business "
-                             f"completing") if mover else
-                            f"they {'completed' if past else 'have been completing'}"
-                            f" more than expected")
-            body = ", and ".join(bits) if bits else f"the passing matchup tilts {t}"
-            out.append(f"Through the air it is worth {pts} to <b>{t}</b>: {body}.")
+                num = pair(t, opp, "cpoe", "{:+.1f}", "%", floor=1.0)
+                completed = "completed" if past else "completing"
+                if num:
+                    bits.append(f"{t} {completed} {num} above expectation")
+                elif not has_lev:
+                    bits.append(f"{t} {completed} more than expected")
+            q_t, q_o = qb_clause(t), qb_clause(opp)
+            if q_t and q_o:
+                bits.append(f"{q_t}, while {q_o}")
+            elif q_t:
+                bits.append(q_t)
+            body = "; ".join(bits) if bits else f"the passing matchup tilts {t}"
+            # The honest awkward case: the model leans one way on passing while
+            # this season's quarterback play points the other. That is not a
+            # contradiction to hide, it is the eight game half-life showing, and
+            # the reader is owed the number.
+            gap = qb_gap()
+            clash = ""
+            if gap is not None and not past and played:
+                leans_home = (t == home)
+                if (gap > 0.05) != leans_home and abs(gap) > 0.05:
+                    clash = (" That cuts against the lean: on this season's "
+                             "play alone the quarterback gap runs the other way, "
+                             "and the efficiency numbers above are still mostly "
+                             "last season's.")
+            out.append(f"Through the air it is worth {pts} to <b>{t}</b>: "
+                       f"{body}.{clash}")
         elif name == "ground":
             bits = []
             if (v["off_rush_diff"] > 0) == (t == home) and v["off_rush_diff"]:
-                bits.append("they got more out of each carry" if past else
-                            "they have been getting more out of each carry")
+                num = pair(t, opp, "off_epa_rush")
+                if num:
+                    bits.append(f"{t} {ARE} at {num} expected points per carry {era}")
+                elif not has_lev:
+                    bits.append("they got more out of each carry" if past else
+                                "they have been getting more out of each carry")
             if (v["def_rush_diff"] > 0) == (opp == home) and v["def_rush_diff"]:
-                verb = "was" if past else "has been"
-                bits.append(f"the {opp} run defence {verb} giving it up")
-            body = ", and ".join(bits) if bits else f"the run matchup tilts {t}"
+                num = pair(opp, t, "def_epa_rush")
+                conc = "conceded" if past else "concedes"
+                gave = "was" if past else "has been"
+                if num:
+                    bits.append(f"the {opp} run defence {conc} {num}")
+                elif not has_lev:
+                    bits.append(f"the {opp} run defence {gave} giving it up")
+            body = "; ".join(bits) if bits else f"the run matchup tilts {t}"
             out.append(f"On the ground it is worth {pts} to <b>{t}</b>: {body}.")
         elif name == "form":
-            if past:
+            a, b = ctx.get(t, {}), ctx.get(opp, {})
+            if a.get("games") and b.get("games"):
+                fav = "favoured" if past else "favours"
+                out.append(f"Recent scoring {fav} <b>{t}</b> by {pts}: "
+                           f"{a['margin']:+.1f} points a game {era} against "
+                           f"{opp}'s {b['margin']:+.1f}.")
+            elif past:
                 out.append(f"<b>{t}</b> outscored people down the stretch last "
                            f"season while {opp} did not, {pts} of it.")
             else:
@@ -1304,10 +1711,12 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
                 (fam_a if t == home else fam_h) * 16)
             tq, oq = qb.get(t), qb.get(opp)
             if nt is not None and tq and oq:
+                own = qb_clause(t)
+                extra = f" For what it is worth, {own}." if own else ""
                 out.append(f"The model has seen more of <b>{t}</b>'s quarterback, "
                            f"{pts}: {tq} started {nt} of their last 16 games while "
                            f"{oq} started {no} of {opp}'s, so it has a firmer read "
-                           f"on one than the other.")
+                           f"on one than the other.{extra}")
             else:
                 out.append(f"The model has seen more of <b>{t}</b>'s listed "
                            f"starter than {opp}'s in recent games, {pts}.")
@@ -1326,7 +1735,10 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
             out.append(f"Situationally it leans <b>{t}</b> by {pts}: "
                        f"{why[0] if why else 'the spot'}.")
     lead = ("Nothing has been played yet this season, so this is all last "
-            "year's evidence. " if past else "")
+            "year's evidence. " if past else
+            (f"Only {played} games have been played this season, so about "
+             f"{carry*100:.0f}% of the model's efficiency read is still last "
+             f"season's. " if 0 < played < 6 else ""))
     if not out:
         # Still says what it is working from. A reader in week 1 deserves the
         # basis even when the answer is "these two look level".
@@ -1341,6 +1753,7 @@ def plain_summary(vals, con, home, away, mu, hqb, aqb, played=0,
 
 
 def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb="",
+                    lev=None, ctx=None, qbx=None, totals=None,
                     played=0, fam_h=None, fam_a=None):
     """Per-game breakdown of what is moving the prediction, biggest first.
 
@@ -1369,7 +1782,7 @@ def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb="",
     return (
         '<details class="reason"><summary>Reasoning</summary>'
         + plain_summary(values, contribs, home, away, mu, hqb, aqb,
-                        played, fam_h, fam_a) +
+                        played, fam_h, fam_a, lev, ctx, qbx) +
         '<p class="rlead">And the same thing as arithmetic, biggest first. Each '
         'number '
         'is how much the prediction would move if that one input were neutral '
@@ -1377,7 +1790,7 @@ def reasoning_panel(cols, values, contribs, home, away, mu, hqb="", aqb="",
         f'prediction above. They will not add up to the {abs(s_line):g} points '
         f'on {side}: the model is a network, not a sum, so each input is '
         'measured on its own.</p>'
-        f'<table class="rtab">{"".join(body)}</table></details>')
+        f'<table class="rtab">{"".join(body)}</table>{totals or ""}</details>')
 
 
 def game_card(r):
@@ -1516,6 +1929,7 @@ def game_card(r):
             f'<div class="bars">{model_bar}{mkt_bar}</div>{gaptxt}'
             f'{sq3_row}'
             f'{reasoning_panel(rd.V3_COLS, r.get("x", []), r.get("contrib", []), r["home"], r["away"], mu, r.get("hqb", ""), r.get("aqb", ""),
+            r.get("lev"), r.get("ctx"), r.get("qbx"), totals_reason(r),
             r.get("played", 0), r.get("fam_h"), r.get("fam_a")) if len(r.get("contrib", [])) else ""}'
             f'{verdict_badge(v)}</div>')
 def build_site(out_path="site.html", games_path="games.csv",
@@ -1523,6 +1937,21 @@ def build_site(out_path="site.html", games_path="games.csv",
                horizon_days=None, edge_threshold=0.04,
                prices_url=DEFAULT_PRICES_URL, mlb_feed=DEFAULT_MLB_FEED):
     df = rd.build_frame(games_path, stats_path)
+    # Three different facts, and the header used to show only the weakest of them.
+    # When the page was built is not when the data was pulled, and neither is the
+    # same as how far the results actually run. A reader looking at a stale card
+    # needs the last two, so all three are printed and the date now carries a time.
+    built = pd.Timestamp.now(tz="UTC")
+    try:
+        pulled = pd.Timestamp(os.path.getmtime(games_path), unit="s", tz="UTC")
+    except OSError:
+        pulled = built
+    _done_all = df[df["result"].notna()]
+    through = ""
+    if len(_done_all):
+        _last = _done_all.sort_values("gameday").iloc[-1]
+        through = (f"{int(_last['season'])} week {int(_last['week'])}, "
+                   f"last game {_last['gameday'].date()}")
     hist, by_season, calib = history_tables(df)
     rec_week, rec_season = rec_records(hist, df)
     tot_hist = totals_history(df)
@@ -1572,8 +2001,16 @@ def build_site(out_path="site.html", games_path="games.csv",
         contrib = rd.feature_contributions(ens, Xu, rd.neutral_row(_train))
         # The totals model is a separate engine with its own features, fitted on
         # the same completed games. Cheap enough to refit here every build.
+        team_ctx, qb_ctx = season_context(df, cur, stats_path)
+        lev_cols = [f"{st}_{side}" for st in EPA_STATS + PACE_STATS
+                    for side in ("home", "away")]
+        lev_cols = [c for c in lev_cols if c in upcoming.columns]
         tmodel = tot.fit_totals(df, cur)
-        tot_mu, tot_sigma = tmodel.predict_dist(upcoming[tot.TOTAL_COLS].values)
+        Xt = upcoming[tot.TOTAL_COLS].values
+        tot_mu, tot_sigma = tmodel.predict_dist(Xt)
+        # Exact, because the totals engine is a linear fit: base plus these terms
+        # is the published number, with nothing left over.
+        tot_c, tot_base, tot_mean = tot.contributions(tmodel, Xt)
         prices = rd.latest_prices(db_path)
         price_age = ""
         try:
@@ -1603,7 +2040,15 @@ def build_site(out_path="site.html", games_path="games.csv",
                                 .replace(" 0", " ")),
                    "played": min(played_by.get(row.home_team, 0),
                                  played_by.get(row.away_team, 0)),
+                   "lev": {c: getattr(row, c, None) for c in lev_cols},
+                   "ctx": {t: team_ctx.get(t, {})
+                           for t in (row.home_team, row.away_team)},
+                   "qbx": {**qb_ctx,
+                           "id_home": getattr(row, "home_qb_id", None),
+                           "id_away": getattr(row, "away_qb_id", None)},
                    "tot_mu": float(tot_mu[j]), "tot_sigma": float(tot_sigma[j]),
+                   "tot_x": Xt[j], "tot_c": tot_c[j], "tot_base": tot_base,
+                   "tot_mean": tot_mean,
                    "total_line": getattr(row, "total_line", None),
                    "fam_h": getattr(row, "qb_fam_home", None),
                    "fam_a": getattr(row, "qb_fam_away", None),
@@ -1781,7 +2226,10 @@ def build_site(out_path="site.html", games_path="games.csv",
 <button id="b-mlb" onclick="tab('mlb')">MLB</button></nav>
 <div class="wrap">
 <h1>NFL <span>Model</span> HQ</h1>
-<p class="sub">A Bayesian margin model &middot; generated {today.date()}</p>
+<p class="sub">A Bayesian margin model &middot; built
+<span class="stamp" data-stamp="{built.strftime('%Y-%m-%dT%H:%M:%SZ')}">{stamp_text(built)}</span>
+&middot; schedule and results pulled
+<span class="stamp" data-stamp="{pulled.strftime('%Y-%m-%dT%H:%M:%SZ')}">{stamp_text(pulled)}</span>{(', complete through ' + through) if through else ''}</p>
 {price_age}
 
 <div id="week" class="panel on">
@@ -1954,7 +2402,6 @@ Their model, their data, their call; this page only displays it.</p>
 
 <footer>One model, honestly uncertain. Nothing here is financial advice.</footer>
 </div></body></html>"""
-    import os
     d = os.path.dirname(out_path)
     if d:
         os.makedirs(d, exist_ok=True)

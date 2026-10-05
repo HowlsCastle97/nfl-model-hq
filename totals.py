@@ -301,6 +301,25 @@ class DeployedTotals:
         return self.lin.predict_dist(X)
 
 
+def contributions(model, X):
+    """Points of total attributable to each input, and the average game's total.
+
+    Exact, unlike the margin model's attribution. The deployed totals engine is a
+    weighted least squares fit, so its prediction really is a sum: the average
+    game's total plus one term per input, each of them the coefficient times how
+    far this game sits from the average game on that input. They add up to the
+    published number with nothing left over, and the site can say so rather than
+    printing the disclaimer the margin panel needs.
+
+    Returns (contributions, base, league_means), where base is the fitted total
+    for a game average on every input.
+    """
+    lin = model.lin if hasattr(model, "lin") else model
+    X = np.atleast_2d(np.asarray(X, float))
+    Z = (X - lin.x_mean_) / lin.x_std_
+    return Z * lin.theta_, float(lin.intercept_), lin.x_mean_.copy()
+
+
 def fit_totals(df, asof_season, cols=TOTAL_COLS):
     """Fit the deployed totals model on every completed game, decayed by season."""
     train = df[df["y_total"].notna()]

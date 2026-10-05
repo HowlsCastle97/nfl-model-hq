@@ -163,7 +163,7 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
   prices have only been logged since 2026: the Vegas price carries the book's vig
   and the Kalshi 7% win fee is absent, so the table is the record of the value
   rule rather than a Kalshi statement, and the page says exactly that.
-  Totals appear in four places, all fed by `tot.DeployedTotals`: `ou_rows` on each
+  Totals appear in five places, all fed by `tot.DeployedTotals`: `ou_rows` on each
   card, which returns two rows for the bold block rather than a line of grey note
   text ("Model total" sits with the other predictions, "O/U pick" with the other
   picks, and the value row keeps the last word), graded on the spread row's own
@@ -175,7 +175,26 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
   backtest, best season 51.1%, so the This Week copy says in as many words that a
   green tag there is the model's strongest lean and not a measured edge. Do not
   quietly drop that sentence; it is the only thing keeping the shared vocabulary
-  honest (principle 3).
+  honest (principle 3). The fifth place is `totals_reason`, a second half to the
+  Reasoning panel. Its arithmetic is exact, unlike the margin half: a linear fit
+  is a sum, so `tot.contributions` returns terms that add to the published total
+  with nothing left over, and the copy says so instead of carrying the margin
+  panel's disclaimer.
+  `plain_summary` quotes numbers rather than asserting conclusions. It used to say
+  things like "X were simply the better side", which is a claim with the evidence
+  deleted. Every clause now carries the figure it rests on, per team rather than
+  as a gap (`{stat}_home` / `{stat}_away` out of `build_features`, display only),
+  and `season_context` supplies records, points for and against, giveaways and the
+  listed starters' own EPA per dropback and interception counts. Three rules hold
+  it together and should survive any edit: tense still follows the evidence; a
+  clause is dropped entirely when the two sides are within 0.03 EPA rather than
+  calling a 0.02 gap "leakier"; and when this season's quarterback play contradicts
+  the model's passing lean, the panel says so and names the eight game half-life
+  as the reason, which is how a reader can tell a stale read from a wrong one.
+  Turnovers are shown and never modelled: an interception is already priced inside
+  the EPA columns at what the play cost, so a separate turnover input would count
+  it twice. `prep_pbp` carries `giveaways` and `takeaways` per team-game and
+  `interceptions` plus `passer` per quarterback-game for exactly this display.
 - `run_v2.py` / `run_deliverable2.py`: reproduction scripts for the model
   comparison tables (2024 validation, 2025 test).
 
@@ -246,9 +265,11 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
    FAILED", the fix is usually to press Run workflow on it in the GitHub UI
    (Actions tab, "Weekly site rebuild", Run workflow), since `workflow_dispatch`
    is declared for exactly that.
-3. Sunday: refresh `games.csv` from nflverse raw GitHub URL, run
-   `python website.py --out docs/index.html`, commit and push (Pages
-   redeploys automatically).
+3. Sunday: refresh `games.csv` from nflverse raw GitHub URL, `python prep_pbp.py
+   --refresh-latest` and `--qb`, run `python website.py --out docs/index.html`,
+   commit and push (Pages redeploys automatically). Then
+   `python weekly_report.py` for the week just finished.
+
 
 ## Current task list
 
@@ -323,6 +344,32 @@ Live site: https://howlscastle97.github.io/nfl-model-hq/ (GitHub Pages from
    once real KXNFLSPREAD rows accumulate and compute spread edges against real
    prices (currently graded against Vegas line at -110); backtest engine over
    logged prices; fractional Kelly sizing.
+
+## The deployed margin model is on probation
+
+Chasing a reader's question about one card on 2026-09-29 turned up a comparison
+nobody had run: the deployed deep ensemble against the ridge model it replaced,
+walk-forward over every season the Track Record covers. Pooled over 1,407 games
+the ensemble is **worse**, NLL +0.0088 [-0.0009, +0.0188] and RMSE 13.107 against
+13.027, worse in four seasons of six, and identical where it counts (ATS 48.8%
+against 48.9%, straight up 63.8% against 63.9%). Its one distinguishing feature, a
+per-game sigma, is what NLL rewards, and NLL does not reward it.
+
+Not grounds to swap, because the interval touches zero and because those seasons
+include the ones the ensemble was tuned on. So the decision is pre-registered in
+`experiment_margin_engine.py`, to be run when 2026 is complete, with the rule and
+the tie-break fixed in advance (a tie swaps to ridge, the same rule already applied
+to the totals engine). Read that file before touching the deployed model. It also
+lists what a swap would cost, including the honest one: every card's plus-or-minus
+becomes the same number, and the Bayesian 101 tab is built around the ensemble.
+
+A related finding worth keeping: the ensemble's attribution for `div_game` averages
+-0.16 points, which matches the data (division games run 0.5 points closer to the
+home team than others), but its standard deviation is 2.46 with extremes past 5.6,
+and the size of the swing correlates +0.52 with `kalman_var`. So it swings hardest
+exactly when the filter knows least, which is early season. Its deficit against
+ridge is 3.6 times larger on division games than elsewhere. Suggestive, not
+established, and it disappears by construction if the swap happens.
 
 ## Totals engine results
 
